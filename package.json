@@ -1,0 +1,25 @@
+{
+  "name": "suma-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Suma — WhatsApp expense tracker bot by Suma Digital",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "vercel build",
+    "deploy": "vercel --prod",
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/vitest run"
+  },
+  "dependencies": {
+    "@google/genai": "^1.42.0",
+    "@supabase/supabase-js": "^2.49.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^5.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
