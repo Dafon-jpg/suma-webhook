@@ -55,7 +55,15 @@ export interface WhatsAppMessage {
   id: string;
   timestamp: string;
   text?: { body: string };
+  audio?: { id: string; mime_type: string };
+  image?: { id: string; mime_type: string; caption?: string };
   type: string;
+}
+
+/** Represents downloaded media content as an in-memory buffer */
+export interface MediaContent {
+  data: Buffer;
+  mimeType: string;
 }
 
 /** Shape of the category lookup table in Supabase */

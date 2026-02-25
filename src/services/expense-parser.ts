@@ -3,8 +3,9 @@
 // Strategy: regex-first (fast & free), LLM fallback (smart & flexible)
 // ============================================================================
 
-import type { ParsedExpense } from "../types";
+import type { ParsedExpense, MediaContent } from "../types";
 import { GoogleGenAI } from "@google/genai";
+import type { Part } from "@google/genai";
 
 // ---------------------------------------------------------------------------
 // Category mapping — extensible keyword dictionary
@@ -148,12 +149,18 @@ interface LLMParsedResponse {
 }
 
 const systemPrompt = `Sos un asistente que extrae datos de gastos de mensajes en español argentino.
+El usuario puede enviar:
+- Un mensaje de texto describiendo un gasto
+- Una nota de voz (audio) dictando un gasto
+- Una foto de un ticket o recibo de compra
+
 Respondé SOLO con un JSON válido (sin markdown) con esta estructura:
 { "amount": number, "description": "string", "category": "string" }
 
 Categorías válidas: comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, otros.
 
-Si el mensaje no es un gasto, respondé: { "amount": 0, "description": "", "category": "" }`;
+Si hay varios ítems en un ticket, sumá el total.
+Si no podés extraer un gasto, respondé: { "amount": 0, "description": "", "category": "" }`;
 
 /**
  * Sends the message to Google Gemini to extract structured expense data.
@@ -161,10 +168,27 @@ Si el mensaje no es un gasto, respondé: { "amount": 0, "description": "", "cate
  */
 export async function parseExpenseLLM(
   message: string,
-  geminiKey: string
+  geminiKey: string,
+  media?: MediaContent
 ): Promise<ParsedExpense | null> {
   try {
     const ai = new GoogleGenAI({ apiKey: geminiKey });
+
+    // Build multimodal parts array
+    const parts: Part[] = [];
+
+    if (media) {
+      parts.push({
+        inlineData: {
+          data: media.data.toString("base64"),
+          mimeType: media.mimeType,
+        },
+      });
+    }
+
+    parts.push({
+      text: message || "Extraé el gasto de este contenido.",
+    });
 
     const result = await ai.models.generateContent({
       model: "gemini-2.0-flash",
@@ -173,7 +197,7 @@ export async function parseExpenseLLM(
         temperature: 0,
         maxOutputTokens: 150,
       },
-      contents: message,
+      contents: [{ role: "user", parts }],
     });
 
     const content: string = result.text ?? "";
@@ -201,9 +225,19 @@ export async function parseExpenseLLM(
  */
 export async function parseExpense(
   message: string,
-  geminiKey?: string
+  geminiKey?: string,
+  media?: MediaContent
 ): Promise<ParsedExpense | null> {
-  // 1. Try fast regex parsing
+  // If media is present, skip regex — go straight to LLM
+  if (media) {
+    if (!geminiKey) {
+      console.error("[SUMA] Cannot process media without GEMINI_API_KEY");
+      return null;
+    }
+    return parseExpenseLLM(message, geminiKey, media);
+  }
+
+  // 1. Try fast regex parsing (text only)
   const regexResult = parseExpenseRegex(message);
   if (regexResult) return regexResult;
 

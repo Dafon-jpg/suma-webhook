@@ -8,9 +8,10 @@
 // ============================================================================
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import type { WhatsAppWebhookBody, WhatsAppMessage } from "../src/types";
+import type { WhatsAppWebhookBody, WhatsAppMessage, MediaContent } from "../src/types";
 import { loadConfig } from "../src/utils/config";
 import { parseExpense } from "../src/services/expense-parser";
+import { downloadWhatsAppMedia } from "../src/services/whatsapp-media";
 import {
   insertExpense,
   upsertUser,
@@ -91,47 +92,133 @@ async function processMessage(
   config: AppConfig
 ): Promise<void> {
   const userPhone = msg.from;
-  const text = msg.text?.body;
 
-  // Only handle text messages
-  if (msg.type !== "text" || !text) return;
+  // ── Text messages (existing flow) ────────────────────────────────────
+  if (msg.type === "text") {
+    const text = msg.text?.body;
+    if (!text) return;
 
-  console.log(`[SUMA] 📩 Message from ${userPhone}: "${text}"`);
+    console.log(`[SUMA] 📩 Message from ${userPhone}: "${text}"`);
 
-  // Try to parse the expense
-  const parsed = await parseExpense(text, config.GEMINI_API_KEY);
+    const parsed = await parseExpense(text, config.GEMINI_API_KEY);
 
-  if (!parsed) {
-    // Could not parse — send help message
-    await sendWhatsAppMessage({
-      to: userPhone,
-      text: formatHelpMessage(),
-      phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
-      apiToken: config.WHATSAPP_API_TOKEN,
-    });
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: formatHelpMessage(),
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    await saveAndConfirmExpense(userPhone, parsed, text, config);
     return;
   }
 
-  // Resolve user and category in parallel
+  // ── Audio messages (voice notes) ─────────────────────────────────────
+  if (msg.type === "audio" && msg.audio) {
+    console.log(`[SUMA] 🎵 Audio from ${userPhone} (${msg.audio.mime_type})`);
+
+    let media: MediaContent;
+    try {
+      media = await downloadWhatsAppMedia(msg.audio.id, config.WHATSAPP_API_TOKEN);
+    } catch (err) {
+      console.error("[SUMA] ❌ Audio download failed:", err);
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "❌ No pude descargar el audio. Por favor intentá de nuevo.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const parsed = await parseExpense("", config.GEMINI_API_KEY, media);
+
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "🤔 No pude extraer un gasto del audio. Probá dictándolo más claro, por ejemplo: _\"Gasté 5000 en pizza\"_",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    await saveAndConfirmExpense(userPhone, parsed, "[audio]", config);
+    return;
+  }
+
+  // ── Image messages (receipt photos) ──────────────────────────────────
+  if (msg.type === "image" && msg.image) {
+    const caption = msg.image.caption ?? "";
+    console.log(`[SUMA] 📷 Image from ${userPhone} (${msg.image.mime_type})${caption ? ` caption: "${caption}"` : ""}`);
+
+    let media: MediaContent;
+    try {
+      media = await downloadWhatsAppMedia(msg.image.id, config.WHATSAPP_API_TOKEN);
+    } catch (err) {
+      console.error("[SUMA] ❌ Image download failed:", err);
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "❌ No pude descargar la imagen. Por favor intentá de nuevo.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const parsed = await parseExpense(caption, config.GEMINI_API_KEY, media);
+
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "🤔 No pude extraer un gasto de la imagen. Asegurate de que sea un ticket legible.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const rawMessage = caption ? `[imagen] ${caption}` : "[imagen]";
+    await saveAndConfirmExpense(userPhone, parsed, rawMessage, config);
+    return;
+  }
+
+  // ── Unsupported message types → silently ignore ──────────────────────
+  console.log(`[SUMA] ⏭️ Ignoring message type: ${msg.type} from ${userPhone}`);
+}
+
+// ---------------------------------------------------------------------------
+// Save expense and send confirmation
+// ---------------------------------------------------------------------------
+
+import type { ParsedExpense } from "../src/types";
+
+async function saveAndConfirmExpense(
+  userPhone: string,
+  parsed: ParsedExpense,
+  rawMessage: string,
+  config: AppConfig
+): Promise<void> {
   const [userId, categoryId] = await Promise.all([
     upsertUser(userPhone),
     resolveCategoryId(parsed.category),
   ]);
 
-  // Save expense
   await insertExpense({
     user_id: userId,
     amount: parsed.amount,
     description: parsed.description,
     category_id: categoryId,
-    raw_message: text,
+    raw_message: rawMessage,
   });
 
   console.log(
     `[SUMA] 💾 Expense saved: $${parsed.amount} — ${parsed.description} [${parsed.category}]`
   );
 
-  // Confirm to user
   await sendWhatsAppMessage({
     to: userPhone,
     text: formatSuccessMessage(parsed.amount, parsed.description, parsed.category),
