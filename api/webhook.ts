@@ -1,105 +1,253 @@
 // ============================================================================
-// SUMA — WhatsApp Webhook (modo prueba — comunicación bidireccional)
+// SUMA — Main WhatsApp Webhook Handler
+// Vercel Serverless Function (Node.js runtime)
+//
+// Handles:
+//   GET  /api/webhook → WhatsApp verification challenge
+//   POST /api/webhook → Incoming messages
 // ============================================================================
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import type { WhatsAppWebhookBody, WhatsAppMessage, MediaContent } from "../src/types/index.js";
+import { loadConfig } from "../src/utils/config.js";
+import { parseExpense } from "../src/services/expense-parser.js";
+import { downloadWhatsAppMedia } from "../src/services/whatsapp-media.js";
+import {
+  insertExpense,
+  upsertUser,
+  resolveCategoryId,
+} from "../src/services/expense-repository.js";
+import {
+  sendWhatsAppMessage,
+  formatSuccessMessage,
+  formatHelpMessage,
+} from "../src/services/whatsapp.js";
 
 // ---------------------------------------------------------------------------
-// Variables de entorno
+// GET — Webhook verification (WhatsApp challenge-response)
 // ---------------------------------------------------------------------------
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID!;
-const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN!;
-const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN!;
 
-const WA_API_URL = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-
-// ---------------------------------------------------------------------------
-// Enviar mensaje de WhatsApp
-// ---------------------------------------------------------------------------
-async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
-  const res = await fetch(WA_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${WHATSAPP_API_TOKEN}`,
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text },
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    console.error(`[SUMA] ❌ WhatsApp API error (${res.status}):`, err);
-    throw new Error(`WhatsApp send failed: ${res.status}`);
-  }
-
-  console.log(`[SUMA] ✅ Mensaje enviado a ${to}`);
-}
-
-// ---------------------------------------------------------------------------
-// GET — Verificación del webhook
-// ---------------------------------------------------------------------------
 function handleVerification(req: VercelRequest, res: VercelResponse): void {
-  const mode = req.query["hub.mode"] as string;
-  const token = req.query["hub.verify_token"] as string;
-  const challenge = req.query["hub.challenge"] as string;
+  const config = loadConfig();
 
-  if (mode === "subscribe" && token === WHATSAPP_VERIFY_TOKEN) {
-    console.log("[SUMA] ✅ Webhook verificado");
+  const mode = req.query["hub.mode"] as string | undefined;
+  const token = req.query["hub.verify_token"] as string | undefined;
+  const challenge = req.query["hub.challenge"] as string | undefined;
+
+  if (mode === "subscribe" && token === config.WHATSAPP_VERIFY_TOKEN) {
+    console.log("[SUMA] ✅ Webhook verified successfully");
     res.status(200).send(challenge);
     return;
   }
 
-  console.warn("[SUMA] ⚠️ Verificación fallida");
+  console.warn("[SUMA] ⚠️ Webhook verification failed — invalid token");
   res.status(403).json({ error: "Forbidden: invalid verify token" });
 }
 
 // ---------------------------------------------------------------------------
-// POST — Procesar mensaje entrante
+// POST — Process incoming WhatsApp messages
 // ---------------------------------------------------------------------------
+
 async function handleIncomingMessage(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  // Responder 200 inmediatamente para evitar reintentos de WhatsApp
+  const config = loadConfig();
+
+  // Respond 200 immediately — WhatsApp retries on timeouts
 
   try {
-    const body = req.body;
+    const body = req.body as WhatsAppWebhookBody;
 
+    // Guard: only process WhatsApp messages
     if (body.object !== "whatsapp_business_account") return;
 
-    // Extraer mensajes del payload
-    for (const entry of body.entry ?? []) {
-      for (const change of entry.changes ?? []) {
-        for (const msg of change.value?.messages ?? []) {
+    // Extract messages from the webhook payload
+    const messages = extractMessages(body);
+    if (messages.length === 0) return;
 
-          // Solo procesar mensajes de texto
-          if (msg.type !== "text") continue;
-
-          const from = msg.from;          // Número del remitente
-          const numeroDestino = from.replace(/^549/, '54');
-          const text = msg.text?.body;
-
-          console.log(`[SUMA] 📩 Mensaje de ${from}: "${text}"`);
-
-          // Respuesta fija de prueba
-          await sendWhatsAppMessage(numeroDestino, "¡Hola! Soy Suma, tu bot de gastos.");
-        }
-      }
+    // Process each message
+    for (const msg of messages) {
+      await processMessage(msg, config);
     }
     res.status(200).json({ status: "received" });
   } catch (err) {
-    console.error("[SUMA] ❌ Error procesando webhook:", err);
+    // Log but don't throw — we already sent 200
+    console.error("[SUMA] ❌ Error processing webhook:", err);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Router principal
+// Message processing pipeline
 // ---------------------------------------------------------------------------
+
+interface AppConfig {
+  WHATSAPP_API_TOKEN: string;
+  WHATSAPP_PHONE_NUMBER_ID: string;
+  GEMINI_API_KEY?: string;
+}
+
+async function processMessage(
+  msg: WhatsAppMessage,
+  config: AppConfig
+): Promise<void> {
+  const userPhone = msg.from.replace(/^549/, '54');
+
+  // ── Text messages (existing flow) ────────────────────────────────────
+  if (msg.type === "text") {
+    const text = msg.text?.body;
+    if (!text) return;
+
+    console.log(`[SUMA] 📩 Message from ${userPhone}: "${text}"`);
+
+    const parsed = await parseExpense(text, config.GEMINI_API_KEY);
+
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: formatHelpMessage(),
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    await saveAndConfirmExpense(userPhone, parsed, text, config);
+    return;
+  }
+
+  // ── Audio messages (voice notes) ─────────────────────────────────────
+  if (msg.type === "audio" && msg.audio) {
+    console.log(`[SUMA] 🎵 Audio from ${userPhone} (${msg.audio.mime_type})`);
+
+    let media: MediaContent;
+    try {
+      media = await downloadWhatsAppMedia(msg.audio.id, config.WHATSAPP_API_TOKEN);
+    } catch (err) {
+      console.error("[SUMA] ❌ Audio download failed:", err);
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "❌ No pude descargar el audio. Por favor intentá de nuevo.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const parsed = await parseExpense("", config.GEMINI_API_KEY, media);
+
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "🤔 No pude extraer un gasto del audio. Probá dictándolo más claro, por ejemplo: _\"Gasté 5000 en pizza\"_",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    await saveAndConfirmExpense(userPhone, parsed, "[audio]", config);
+    return;
+  }
+
+  // ── Image messages (receipt photos) ──────────────────────────────────
+  if (msg.type === "image" && msg.image) {
+    const caption = msg.image.caption ?? "";
+    console.log(`[SUMA] 📷 Image from ${userPhone} (${msg.image.mime_type})${caption ? ` caption: "${caption}"` : ""}`);
+
+    let media: MediaContent;
+    try {
+      media = await downloadWhatsAppMedia(msg.image.id, config.WHATSAPP_API_TOKEN);
+    } catch (err) {
+      console.error("[SUMA] ❌ Image download failed:", err);
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "❌ No pude descargar la imagen. Por favor intentá de nuevo.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const parsed = await parseExpense(caption, config.GEMINI_API_KEY, media);
+
+    if (!parsed) {
+      await sendWhatsAppMessage({
+        to: userPhone,
+        text: "🤔 No pude extraer un gasto de la imagen. Asegurate de que sea un ticket legible.",
+        phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+        apiToken: config.WHATSAPP_API_TOKEN,
+      });
+      return;
+    }
+
+    const rawMessage = caption ? `[imagen] ${caption}` : "[imagen]";
+    await saveAndConfirmExpense(userPhone, parsed, rawMessage, config);
+    return;
+  }
+
+  // ── Unsupported message types → silently ignore ──────────────────────
+  console.log(`[SUMA] ⏭️ Ignoring message type: ${msg.type} from ${userPhone}`);
+}
+
+// ---------------------------------------------------------------------------
+// Save expense and send confirmation
+// ---------------------------------------------------------------------------
+
+import type { ParsedExpense } from "../src/types/index.js";
+
+async function saveAndConfirmExpense(
+  userPhone: string,
+  parsed: ParsedExpense,
+  rawMessage: string,
+  config: AppConfig
+): Promise<void> {
+  const [userId, categoryId] = await Promise.all([
+    upsertUser(userPhone),
+    resolveCategoryId(parsed.category),
+  ]);
+
+  await insertExpense({
+    user_id: userId,
+    amount: parsed.amount,
+    description: parsed.description,
+    category_id: categoryId,
+    raw_message: rawMessage,
+  });
+
+  console.log(
+    `[SUMA] 💾 Expense saved: $${parsed.amount} — ${parsed.description} [${parsed.category}]`
+  );
+
+  await sendWhatsAppMessage({
+    to: userPhone,
+    text: formatSuccessMessage(parsed.amount, parsed.description, parsed.category),
+    phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+    apiToken: config.WHATSAPP_API_TOKEN,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function extractMessages(body: WhatsAppWebhookBody): WhatsAppMessage[] {
+  const messages: WhatsAppMessage[] = [];
+
+  for (const entry of body.entry ?? []) {
+    for (const change of entry.changes ?? []) {
+      const msgs = change.value?.messages;
+      if (msgs) messages.push(...msgs);
+    }
+  }
+
+  return messages;
+}
+
+// ---------------------------------------------------------------------------
+// Route handler
+// ---------------------------------------------------------------------------
+
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
