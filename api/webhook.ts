@@ -81,12 +81,13 @@ async function handleIncomingMessage(
           if (msg.type !== "text") continue;
 
           const from = msg.from;          // Número del remitente
+          const numeroDestino = from.replace(/^549/, '54');
           const text = msg.text?.body;
 
           console.log(`[SUMA] 📩 Mensaje de ${from}: "${text}"`);
 
           // Respuesta fija de prueba
-          await sendWhatsAppMessage(from, "¡Hola! Soy Suma, tu bot de gastos.");
+          await sendWhatsAppMessage(numeroDestino, "¡Hola! Soy Suma, tu bot de gastos.");
         }
       }
     }
