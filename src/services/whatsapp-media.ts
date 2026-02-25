@@ -3,7 +3,7 @@
 // Downloads audio/image files from WhatsApp Cloud API into memory buffers.
 // ============================================================================
 
-import type { MediaContent } from "../types";
+import type { MediaContent } from "../types/index.js";
 
 const WA_API_BASE = "https://graph.facebook.com/v21.0";
 

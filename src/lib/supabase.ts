@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { loadConfig } from "../utils/config";
+import { loadConfig } from "../utils/config.js";
 
 let client: SupabaseClient | null = null;
 

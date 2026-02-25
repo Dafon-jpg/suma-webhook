@@ -2,8 +2,8 @@
 // Expense Repository — CRUD operations against Supabase
 // ============================================================================
 
-import { getSupabaseClient } from "../lib/supabase";
-import type { ExpenseRow } from "../types";
+import { getSupabaseClient } from "../lib/supabase.js";
+import type { ExpenseRow } from "../types/index.js";
 
 /**
  * Inserts a new expense row into the `expenses` table.

@@ -3,7 +3,7 @@
 // Strategy: regex-first (fast & free), LLM fallback (smart & flexible)
 // ============================================================================
 
-import type { ParsedExpense, MediaContent } from "../types";
+import type { ParsedExpense, MediaContent } from "../types/index.js";
 import { GoogleGenAI } from "@google/genai";
 import type { Part } from "@google/genai";
 

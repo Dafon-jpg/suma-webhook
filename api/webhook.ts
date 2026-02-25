@@ -8,20 +8,20 @@
 // ============================================================================
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import type { WhatsAppWebhookBody, WhatsAppMessage, MediaContent } from "../src/types";
-import { loadConfig } from "../src/utils/config";
-import { parseExpense } from "../src/services/expense-parser";
-import { downloadWhatsAppMedia } from "../src/services/whatsapp-media";
+import type { WhatsAppWebhookBody, WhatsAppMessage, MediaContent } from "../src/types/index.js";
+import { loadConfig } from "../src/utils/config.js";
+import { parseExpense } from "../src/services/expense-parser.js";
+import { downloadWhatsAppMedia } from "../src/services/whatsapp-media.js";
 import {
   insertExpense,
   upsertUser,
   resolveCategoryId,
-} from "../src/services/expense-repository";
+} from "../src/services/expense-repository.js";
 import {
   sendWhatsAppMessage,
   formatSuccessMessage,
   formatHelpMessage,
-} from "../src/services/whatsapp";
+} from "../src/services/whatsapp.js";
 
 // ---------------------------------------------------------------------------
 // GET — Webhook verification (WhatsApp challenge-response)
@@ -194,7 +194,7 @@ async function processMessage(
 // Save expense and send confirmation
 // ---------------------------------------------------------------------------
 
-import type { ParsedExpense } from "../src/types";
+import type { ParsedExpense } from "../src/types/index.js";
 
 async function saveAndConfirmExpense(
   userPhone: string,

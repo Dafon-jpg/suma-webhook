@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { describe, it, expect } from "vitest";
-import { parseExpenseRegex } from "../src/services/expense-parser";
+import { parseExpenseRegex } from "../src/services/expense-parser.js";
 
 describe("parseExpenseRegex", () => {
   it('parses "gasté 5000 en pizza"', () => {

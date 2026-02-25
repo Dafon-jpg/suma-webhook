@@ -2,7 +2,7 @@
 // Config loader — fails fast if required env vars are missing
 // ============================================================================
 
-import type { AppConfig } from "../types";
+import type { AppConfig } from "../types/index.js";
 
 const REQUIRED_VARS = [
   "WHATSAPP_VERIFY_TOKEN",
