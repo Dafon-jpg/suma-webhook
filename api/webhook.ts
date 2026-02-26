@@ -85,21 +85,16 @@ async function handleIncomingWebhook(
     return;
   }
 
-  // ── Step 3: Return 200 IMMEDIATELY — then enqueue in background ─────
-  // Vercel keeps the function alive briefly after res.send() so we can
-  // fire-and-forget the QStash publishes. If any fail, QStash dedup on
-  // the worker side + idempotency table protects us.
-  res.status(200).json({ status: "queued", count: items.length });
-
-  // Determine the worker URL
+  // ── Step 3: Enqueue in QStash THEN return 200 ──────────────────────
+  // QStash publish is fast (~50ms), safe to do before responding.
+  // Vercel Hobby kills the function immediately after res.send().
   const baseUrl = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
     : "http://localhost:3000";
   const targetUrl = `${baseUrl}/api/process-message`;
 
-  // Enqueue each message independently (fail isolation)
-  const enqueuePromises = items.map(async (item) => {
-    try {
+  const enqueueResults = await Promise.allSettled(
+    items.map(async (item) => {
       const result = await publishToQStash({
         qstashToken: config.QSTASH_TOKEN,
         targetUrl,
@@ -108,17 +103,16 @@ async function handleIncomingWebhook(
       console.log(
         `[SUMA] 📤 Queued ${item.message.id} → QStash ${result.messageId}`
       );
-    } catch (err) {
-      // Log but don't crash — the message is lost only if QStash publish
-      // fails AND Meta doesn't retry. This is extremely unlikely.
-      console.error(
-        `[SUMA] ❌ Failed to queue ${item.message.id}:`,
-        err
-      );
-    }
-  });
+      return result;
+    })
+  );
 
-  await Promise.allSettled(enqueuePromises);
+  const failed = enqueueResults.filter((r) => r.status === "rejected");
+  if (failed.length > 0) {
+    console.error(`[SUMA] ❌ Failed to queue ${failed.length}/${items.length} messages`);
+  }
+
+  res.status(200).json({ status: "queued", count: items.length });
 }
 
 // ---------------------------------------------------------------------------
