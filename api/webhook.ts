@@ -88,10 +88,7 @@ async function handleIncomingWebhook(
   // ── Step 3: Enqueue in QStash THEN return 200 ──────────────────────
   // QStash publish is fast (~50ms), safe to do before responding.
   // Vercel Hobby kills the function immediately after res.send().
-  const baseUrl = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : "http://localhost:3000";
-  const targetUrl = `${baseUrl}/api/process-message`;
+  const targetUrl = "https://suma-webhook.vercel.app/api/process-message";
 
   const enqueueResults = await Promise.allSettled(
     items.map(async (item) => {
