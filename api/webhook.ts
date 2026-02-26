@@ -17,6 +17,17 @@ import type {
 import { loadConfig } from "../src/utils/config.js";
 import { validateWebhookSignature } from "../src/lib/hmac.js";
 import { publishToQStash } from "../src/queue/qstash.js";
+import type { IncomingMessage } from "node:http";
+
+/** Reads the entire request body as a raw string from the stream */
+function getRawBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // GET — Webhook verification (Meta challenge-response handshake)
@@ -50,10 +61,8 @@ async function handleIncomingWebhook(
   const config = loadConfig();
 
   // ── Step 1: Validate HMAC signature ─────────────────────────────────
+  const rawBody = await getRawBody(req);
   const signature = req.headers["x-hub-signature-256"] as string | undefined;
-  const rawBody = typeof req.body === "string"
-    ? req.body
-    : JSON.stringify(req.body);
 
   if (!validateWebhookSignature(rawBody, signature, config.WHATSAPP_APP_SECRET)) {
     console.error("[SUMA] ❌ Invalid webhook signature — rejecting");
@@ -62,8 +71,7 @@ async function handleIncomingWebhook(
   }
 
   // ── Step 2: Parse and extract messages ──────────────────────────────
-  const body: WhatsAppWebhookBody =
-    typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  const body: WhatsAppWebhookBody = JSON.parse(rawBody);
 
   if (body.object !== "whatsapp_business_account") {
     res.status(200).json({ status: "ignored" });
@@ -165,3 +173,9 @@ export default async function handler(
       res.status(405).json({ error: "Method not allowed" });
   }
 }
+
+// Disable Vercel's automatic body parser so we get the raw body
+// for HMAC signature validation (byte-for-byte match required)
+export const config = {
+  api: { bodyParser: false },
+};
