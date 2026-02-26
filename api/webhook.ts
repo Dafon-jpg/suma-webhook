@@ -107,9 +107,12 @@ async function handleIncomingWebhook(
     })
   );
 
-  const failed = enqueueResults.filter((r) => r.status === "rejected");
+  const failed = enqueueResults.filter((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failed.length > 0) {
-    console.error(`[SUMA] ❌ Failed to queue ${failed.length}/${items.length} messages`);
+    console.error(
+      `[SUMA] ❌ Failed to queue ${failed.length}/${items.length} messages`,
+      failed.map((r) => r.reason)
+    );
   }
 
   res.status(200).json({ status: "queued", count: items.length });
