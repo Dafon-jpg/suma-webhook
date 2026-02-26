@@ -8,7 +8,7 @@
 import { Receiver } from "@upstash/qstash";
 import type { QueuedMessagePayload } from "../types/index.js";
 
-const QSTASH_PUBLISH_URL = "https://qstash.upstash.io/v2/publish/";
+const QSTASH_PUBLISH_URL = "https://qstash-us-east-1.upstash.io/v2/publish/";
 
 // ---------------------------------------------------------------------------
 // Publish a message to the worker endpoint via QStash
