@@ -1,16 +1,21 @@
 // ============================================================================
-// SUMA - WhatsApp Expense Tracker
-// Types & Interfaces
+// SUMA — Types & Interfaces
 // ============================================================================
 
-/** Represents a parsed expense from a user message */
+// ---------------------------------------------------------------------------
+// Parsed data
+// ---------------------------------------------------------------------------
+
 export interface ParsedExpense {
   amount: number;
   description: string;
   category: string;
 }
 
-/** Row shape matching the Supabase `expenses` table */
+// ---------------------------------------------------------------------------
+// Supabase row shapes
+// ---------------------------------------------------------------------------
+
 export interface ExpenseRow {
   user_id: string;
   amount: number;
@@ -19,8 +24,25 @@ export interface ExpenseRow {
   raw_message: string;
   created_at?: string;
 }
+/** Info returned from upsertUser */
+export interface UserInfo {
+  id: string;
+  isSubscribed: boolean;
+  email: string | null;
+  spreadsheetId: string | null;
+  spreadsheetUrl: string | null;
+}
 
-/** Subset of the WhatsApp Cloud API webhook payload we care about */
+export interface CategoryRow {
+  id: string;
+  name: string;
+  keywords: string[];
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Cloud API payload types
+// ---------------------------------------------------------------------------
+
 export interface WhatsAppWebhookBody {
   object: string;
   entry: WhatsAppEntry[];
@@ -60,25 +82,39 @@ export interface WhatsAppMessage {
   type: string;
 }
 
-/** Represents downloaded media content as an in-memory buffer */
 export interface MediaContent {
   data: Buffer;
   mimeType: string;
 }
 
-/** Shape of the category lookup table in Supabase */
-export interface CategoryRow {
-  id: string;
-  name: string;
-  keywords: string[];
-}
+// ---------------------------------------------------------------------------
+// App config (env vars)
+// ---------------------------------------------------------------------------
 
-/** Config object for environment variables (validated at startup) */
 export interface AppConfig {
   WHATSAPP_VERIFY_TOKEN: string;
   WHATSAPP_API_TOKEN: string;
   WHATSAPP_PHONE_NUMBER_ID: string;
+  WHATSAPP_APP_SECRET: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  GEMINI_API_KEY?: string; // Optional: only if using LLM parsing
+  GEMINI_API_KEY?: string;
+  QSTASH_TOKEN: string;
+  QSTASH_CURRENT_SIGNING_KEY: string;
+  QSTASH_NEXT_SIGNING_KEY: string;
+}
+
+// ---------------------------------------------------------------------------
+// Queue message payload (webhook → worker)
+// ---------------------------------------------------------------------------
+
+/** The payload we enqueue in QStash for the worker to process */
+export interface QueuedMessagePayload {
+  message: WhatsAppMessage;
+  contacts?: WhatsAppContact[];
+  metadata: {
+    phone_number_id: string;
+    display_phone_number: string;
+  };
+  receivedAt: string; // ISO timestamp for observability
 }

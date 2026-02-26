@@ -1,9 +1,5 @@
-// ============================================================================
-// Expense Repository — CRUD operations against Supabase
-// ============================================================================
-
 import { getSupabaseClient } from "../lib/supabase.js";
-import type { ExpenseRow } from "../types/index.js";
+import type { ExpenseRow, UserInfo } from "../types/index.js";
 
 /**
  * Inserts a new expense row into the `expenses` table.
@@ -28,15 +24,16 @@ export async function insertExpense(expense: ExpenseRow): Promise<ExpenseRow> {
 
 /**
  * Finds or creates a user by WhatsApp phone number.
- * Returns the user_id (UUID).
+ * Returns UserInfo with id and subscription status.
  *
- * Uses the `users` table with columns: id (uuid), phone (text), name (text).
- * Performs an upsert on the phone number.
+ * Subscription is considered active when:
+ *   - is_subscribed = true AND
+ *   - subscription_end_date is NULL (no expiry) or in the future
  */
 export async function upsertUser(
   phone: string,
   name?: string
-): Promise<string> {
+): Promise<UserInfo> {
   const supabase = getSupabaseClient();
 
   const { data, error } = await supabase
@@ -45,7 +42,7 @@ export async function upsertUser(
       { phone, name: name ?? null },
       { onConflict: "phone" }
     )
-    .select("id")
+    .select("id, is_subscribed, subscription_end_date, email, spreadsheet_id, spreadsheet_url")
     .single();
 
   if (error) {
@@ -53,7 +50,18 @@ export async function upsertUser(
     throw new Error(`Failed to upsert user: ${error.message}`);
   }
 
-  return data.id as string;
+  const isSubscribed =
+    data.is_subscribed === true &&
+    (data.subscription_end_date === null ||
+      new Date(data.subscription_end_date) > new Date());
+
+  return {
+    id: data.id as string,
+    isSubscribed,
+    email: (data.email as string) ?? null,
+    spreadsheetId: (data.spreadsheet_id as string) ?? null,
+    spreadsheetUrl: (data.spreadsheet_url as string) ?? null,
+  };
 }
 
 /**

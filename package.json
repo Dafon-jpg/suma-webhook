@@ -13,7 +13,9 @@
   },
   "dependencies": {
     "@google/genai": "^1.42.0",
-    "@supabase/supabase-js": "^2.49.0"
+    "@supabase/supabase-js": "^2.49.0",
+    "@upstash/qstash": "^2.9.0",
+    "googleapis": "^171.4.0"
   },
   "devDependencies": {
     "@vercel/node": "^5.0.0",
