@@ -174,7 +174,6 @@ export async function parseExpenseLLM(
   try {
     const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-    // Build multimodal parts array
     const parts: Part[] = [];
 
     if (media) {
@@ -195,13 +194,20 @@ export async function parseExpenseLLM(
       config: {
         systemInstruction: systemPrompt,
         temperature: 0,
-        maxOutputTokens: 150,
+        responseMimeType: "application/json",  // Fuerza JSON nativo
       },
       contents: [{ role: "user", parts }],
     });
 
-    const content: string = result.text ?? "";
-    const parsed: LLMParsedResponse = JSON.parse(content);
+    const raw: string = result.text ?? "";
+
+    // Limpiar respuesta: quitar markdown fences y texto extra
+    const jsonStr = raw
+      .replace(/```json\s*/gi, "")
+      .replace(/```\s*/g, "")
+      .trim();
+
+    const parsed: LLMParsedResponse = JSON.parse(jsonStr);
 
     if (!parsed.amount || parsed.amount <= 0) return null;
 
