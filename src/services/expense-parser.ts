@@ -191,7 +191,7 @@ export async function parseExpenseLLM(
     });
 
     const result = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       config: {
         systemInstruction: systemPrompt,
         temperature: 0,
