@@ -25,10 +25,9 @@ import {
 import { parseExpense } from "../src/services/expense-parser.js";
 import { downloadWhatsAppMedia } from "../src/services/whatsapp-media.js";
 import {
-    insertExpense,
     upsertUser,
-    resolveCategoryId,
-} from "../src/services/expense-repository.js";
+    saveExpenseAsTransaction,
+} from "../src/services/transaction-repository.js";
 import {
     sendWhatsAppMessage,
     formatSuccessMessage,
@@ -209,21 +208,16 @@ async function saveAndConfirm(
     rawMessage: string,
     sendParams: SendParams
 ): Promise<void> {
-    const [userId, categoryId] = await Promise.all([
-        upsertUser(userPhone),
-        resolveCategoryId(parsed.category),
-    ]);
+    const userInfo = await upsertUser(userPhone);
 
-    await insertExpense({
-        user_id: userId.id,
-        amount: parsed.amount,
-        description: parsed.description,
-        category_id: categoryId,
-        raw_message: rawMessage,
+    await saveExpenseAsTransaction({
+        userId: userInfo.id,
+        parsed,
+        rawMessage,
     });
 
     console.log(
-        `[SUMA] 💾 Expense saved: $${parsed.amount} — ${parsed.description} [${parsed.category}]`
+        `[SUMA] 💾 Transaction saved: $${parsed.amount} — ${parsed.description} [${parsed.category}]`
     );
 
     await sendWhatsAppMessage({
