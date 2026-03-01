@@ -2,6 +2,8 @@
 // WhatsApp Cloud API — send messages back to the user
 // ============================================================================
 
+import type { ParsedTransactionData, TransactionType } from "../types/index.js";
+
 const WA_API_BASE = "https://graph.facebook.com/v21.0";
 
 interface SendMessageParams {
@@ -43,13 +45,49 @@ export async function sendWhatsAppMessage({
   }
 }
 
+// ---------------------------------------------------------------------------
+// Message formatters (Sección 3 — intent-aware)
+// ---------------------------------------------------------------------------
+
+const TYPE_LABELS: Record<TransactionType, { emoji: string; label: string }> = {
+  expense: { emoji: "💸", label: "Gasto registrado" },
+  income: { emoji: "💰", label: "Ingreso registrado" },
+  transfer: { emoji: "🔄", label: "Transferencia registrada" },
+};
+
 /**
- * Formats a success message for the user after saving an expense.
+ * Formats a success message after saving a transaction.
+ * Adapts emoji and wording based on transaction type.
+ */
+export function formatTransactionSuccess(data: ParsedTransactionData): string {
+  const formatted = data.amount.toLocaleString("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    minimumFractionDigits: 0,
+  });
+
+  const { emoji, label } = TYPE_LABELS[data.type];
+
+  return [
+    `✅ *${label}*`,
+    ``,
+    `${emoji} *Monto:* ${formatted}`,
+    `📝 *Descripción:* ${data.description}`,
+    `🏷️ *Categoría:* ${data.category}`,
+    `🏦 *Cuenta:* ${data.account}`,
+    ``,
+    `_Enviá "resumen" para ver tus movimientos del mes._`,
+  ].join("\n");
+}
+
+/**
+ * @deprecated Use formatTransactionSuccess instead.
+ * Kept temporarily for backward compatibility.
  */
 export function formatSuccessMessage(
   amount: number,
   description: string,
-  category: string
+  category: string,
 ): string {
   const formatted = amount.toLocaleString("es-AR", {
     style: "currency",
@@ -73,12 +111,13 @@ export function formatSuccessMessage(
  */
 export function formatHelpMessage(): string {
   return [
-    `🤔 No pude entender ese gasto.`,
+    `🤔 No entendí tu mensaje.`,
     ``,
     `Probá con alguno de estos formatos:`,
     `• _"Gasté 5000 en pizza"_`,
     `• _"Uber $3200"_`,
-    `• _"$1500 café"_`,
+    `• _"Cobré 50000 de sueldo"_`,
+    `• _"Transferí 10000 a MercadoPago"_`,
     ``,
     `_También podés escribir "resumen" o "ayuda"._`,
   ].join("\n");

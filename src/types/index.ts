@@ -2,6 +2,7 @@
 // Shared Types — Suma Financial Assistant
 //
 // Sección 2: Ledger model (accounts + transactions)
+// Sección 3: Intent router & transaction parser
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -11,6 +12,16 @@
 export type TransactionType = "income" | "expense" | "transfer";
 
 export type AccountType = "cash" | "bank" | "digital_wallet" | "credit_card";
+
+// ---------------------------------------------------------------------------
+// Intent Router enums (Sección 3)
+// ---------------------------------------------------------------------------
+
+export type IntentType =
+  | "record_transaction"
+  | "query"
+  | "system_command"
+  | "unknown";
 
 // ---------------------------------------------------------------------------
 // Database row types (match Supabase schema exactly)
@@ -28,7 +39,7 @@ export interface AccountRow {
   created_at?: string;
 }
 
-/** Row in the `transactions` table (replaces old ExpenseRow) */
+/** Row in the `transactions` table */
 export interface TransactionRow {
   id?: string;         // UUID, auto-generated on insert
   user_id: string;
@@ -45,9 +56,44 @@ export interface TransactionRow {
   created_at?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Parser output types (Sección 3 — replaces ParsedExpense)
+// ---------------------------------------------------------------------------
+
 /**
- * @deprecated Use TransactionRow instead. Kept for backward compatibility
- * during migration period.
+ * Transaction data extracted by the LLM when intent is "record_transaction".
+ * This is the structured output the parser returns for financial operations.
+ */
+export interface ParsedTransactionData {
+  type: TransactionType;
+  amount: number;
+  description: string;
+  category: string;
+  account: string;
+}
+
+/**
+ * Full structured response from the transaction parser (LLM or regex+wrapper).
+ * This is the single contract between the parser and the orchestrator.
+ */
+export interface ParsedIntent {
+  intent: IntentType;
+  transaction_data: ParsedTransactionData | null;
+  reply_message: string;
+}
+
+/**
+ * @deprecated Use ParsedTransactionData instead.
+ * Kept for backward compatibility during migration (regex parser still uses this shape).
+ */
+export interface ParsedExpense {
+  amount: number;
+  description: string;
+  category: string;
+}
+
+/**
+ * @deprecated Use TransactionRow instead.
  */
 export interface ExpenseRow {
   user_id: string;
@@ -55,21 +101,6 @@ export interface ExpenseRow {
   description: string;
   category_id: string;
   raw_message?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Parser output types
-// ---------------------------------------------------------------------------
-
-/**
- * Output from the expense parser (regex or LLM).
- * Still called ParsedExpense because the parser hasn't been updated yet.
- * Will evolve to ParsedTransaction in Sección 3 when we update Gemini.
- */
-export interface ParsedExpense {
-  amount: number;
-  description: string;
-  category: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,22 +179,4 @@ export interface QueuedMessagePayload {
     display_phone_number: string;
   };
   receivedAt: string;
-}
-
-// ---------------------------------------------------------------------------
-// App configuration
-// ---------------------------------------------------------------------------
-
-export interface AppConfig {
-  WHATSAPP_API_TOKEN: string;
-  WHATSAPP_PHONE_NUMBER_ID: string;
-  WHATSAPP_VERIFY_TOKEN: string;
-  WHATSAPP_APP_SECRET: string;
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  GEMINI_API_KEY: string;
-  QSTASH_TOKEN: string;
-  QSTASH_CURRENT_SIGNING_KEY: string;
-  QSTASH_NEXT_SIGNING_KEY: string;
-  VERCEL_URL: string;
 }
