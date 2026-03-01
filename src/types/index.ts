@@ -180,3 +180,21 @@ export interface QueuedMessagePayload {
   };
   receivedAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// App configuration
+// ---------------------------------------------------------------------------
+
+export interface AppConfig {
+  WHATSAPP_API_TOKEN: string;
+  WHATSAPP_PHONE_NUMBER_ID: string;
+  WHATSAPP_VERIFY_TOKEN: string;
+  WHATSAPP_APP_SECRET: string;
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
+  GEMINI_API_KEY?: string;
+  QSTASH_TOKEN: string;
+  QSTASH_CURRENT_SIGNING_KEY: string;
+  QSTASH_NEXT_SIGNING_KEY: string;
+  VERCEL_URL?: string;
+}
