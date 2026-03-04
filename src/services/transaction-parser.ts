@@ -16,7 +16,7 @@ import type {
     MediaContent,
 } from "../types/index.js";
 import { GoogleGenAI, Type } from "@google/genai";
-import type { Part } from "@google/genai";
+import type { Schema, Part } from "@google/genai";
 
 // ---------------------------------------------------------------------------
 // Re-export regex parser (kept as fast-path for obvious expenses)
@@ -25,16 +25,19 @@ import type { Part } from "@google/genai";
 export { parseExpenseRegex } from "./expense-parser.js";
 import { parseExpenseRegex } from "./expense-parser.js";
 
+// Module-level diagnostic log — if you DON'T see this, the module crashed on import
+console.log("[SUMA] ✅ transaction-parser module loaded");
+
 // ---------------------------------------------------------------------------
 // Gemini Structured Output Schema
 // ---------------------------------------------------------------------------
 
 /**
  * JSON Schema passed to Gemini's `responseSchema` config property.
- * This enforces the LLM to return EXACTLY this shape — no markdown,
- * no extra fields, no broken JSON. Uses the native @google/genai Type enum.
+ * Typed as `Schema` from the SDK for guaranteed compatibility.
+ * Do NOT use `as const` — the SDK expects mutable property types.
  */
-const TRANSACTION_RESPONSE_SCHEMA = {
+const TRANSACTION_RESPONSE_SCHEMA: Schema = {
     type: Type.OBJECT,
     properties: {
         intent: {
@@ -77,7 +80,7 @@ const TRANSACTION_RESPONSE_SCHEMA = {
         },
     },
     required: ["intent", "transaction_data", "reply_message"],
-} as const;
+};
 
 // ---------------------------------------------------------------------------
 // System prompt — instructs Gemini on how to classify and extract
@@ -119,13 +122,6 @@ REGLAS IMPORTANTES:
 // LLM-based parser — Gemini with Structured Outputs
 // ---------------------------------------------------------------------------
 
-/**
- * Calls Gemini 2.0 Flash with a strict JSON Schema to classify
- * the user's intent and optionally extract transaction data.
- *
- * Uses `responseSchema` (native structured output) so the response
- * is guaranteed to conform to our schema — no manual JSON.parse() needed.
- */
 async function parseWithLLM(
     message: string,
     geminiKey: string,
@@ -133,7 +129,6 @@ async function parseWithLLM(
 ): Promise<ParsedIntent> {
     const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-    // Build multimodal parts array
     const parts: Part[] = [];
 
     if (media) {
@@ -163,12 +158,10 @@ async function parseWithLLM(
     const raw = result.text ?? "";
     const parsed: ParsedIntent = JSON.parse(raw);
 
-    // Sanitize: ensure transaction_data is null for non-transaction intents
     if (parsed.intent !== "record_transaction") {
         parsed.transaction_data = null;
     }
 
-    // Validate amount is positive when transaction_data exists
     if (parsed.transaction_data && parsed.transaction_data.amount <= 0) {
         return {
             intent: "unknown",
@@ -184,44 +177,29 @@ async function parseWithLLM(
 // Regex → ParsedIntent bridge
 // ---------------------------------------------------------------------------
 
-/**
- * Wraps a successful regex ParsedExpense into the new ParsedIntent contract.
- * This lets the orchestrator work with a single type regardless of source.
- */
 function regexToParsedIntent(regexResult: ParsedExpense): ParsedIntent {
     return {
         intent: "record_transaction",
         transaction_data: {
-            type: "expense", // Regex only catches expenses
+            type: "expense",
             amount: regexResult.amount,
             description: regexResult.description,
             category: regexResult.category,
-            account: "Efectivo", // Default — regex can't infer payment method
+            account: "Efectivo",
         },
         reply_message: "",
     };
 }
 
 // ---------------------------------------------------------------------------
-// Main entry point — orchestrates regex fast-path + LLM fallback
+// Main entry point
 // ---------------------------------------------------------------------------
 
-/**
- * Parses any user message (text, audio, image) and returns a classified intent
- * with optional transaction data.
- *
- * Strategy:
- *   - Text only + no media → try regex first (free, instant)
- *   - Regex match → wrap as ParsedIntent
- *   - Regex miss or media present → call Gemini Structured Output
- *   - No API key → return unknown with help message
- */
 export async function parseTransaction(
     message: string,
     geminiKey?: string,
     media?: MediaContent,
 ): Promise<ParsedIntent> {
-    // Media present → skip regex, go straight to LLM (needs multimodal)
     if (media) {
         if (!geminiKey) {
             console.error("[SUMA] Cannot process media without GEMINI_API_KEY");
@@ -244,13 +222,11 @@ export async function parseTransaction(
         }
     }
 
-    // Text only → try regex fast-path
     const regexResult = parseExpenseRegex(message);
     if (regexResult) {
         return regexToParsedIntent(regexResult);
     }
 
-    // Regex failed → fall back to LLM for intent classification
     if (geminiKey) {
         try {
             return await parseWithLLM(message, geminiKey);
@@ -264,7 +240,6 @@ export async function parseTransaction(
         }
     }
 
-    // No API key and regex didn't match → can't do much
     return {
         intent: "unknown",
         transaction_data: null,
