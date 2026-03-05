@@ -2,12 +2,11 @@
 // Transaction Parser — Intent Router + Structured Output (Sección 3)
 //
 // Strategy:
-//   1. Text messages → try regex fast-path (free, <1ms)
-//   2. If regex matches → wrap as ParsedIntent with intent "record_transaction"
-//   3. If regex fails OR media present → call Gemini with Structured Outputs
+//   1. Media present → call Gemini directly (needs multimodal)
+//   2. Text + API key → call Gemini (classifies intent + extracts data)
+//   3. Text + no API key (or LLM failed) → regex fallback (expenses only)
 //
-// The Gemini call uses `responseSchema` to enforce a strict JSON contract,
-// eliminating the need for fragile JSON.parse() on free-text LLM output.
+// Uses `responseSchema` to enforce a strict JSON contract.
 // ============================================================================
 
 import type {
@@ -15,8 +14,8 @@ import type {
     ParsedExpense,
     MediaContent,
 } from "../types/index.js";
-import { GoogleGenAI, Type } from "@google/genai";
-import type { Schema, Part } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
+import type { Part } from "@google/genai";
 
 // ---------------------------------------------------------------------------
 // Re-export regex parser (kept as fast-path for obvious expenses)
@@ -25,7 +24,7 @@ import type { Schema, Part } from "@google/genai";
 export { parseExpenseRegex } from "./expense-parser.js";
 import { parseExpenseRegex } from "./expense-parser.js";
 
-// Module-level diagnostic log — if you DON'T see this, the module crashed on import
+// Diagnostic — if you don't see this, the module crashed on import
 console.log("[SUMA] ✅ transaction-parser module loaded");
 
 // ---------------------------------------------------------------------------
@@ -33,49 +32,51 @@ console.log("[SUMA] ✅ transaction-parser module loaded");
 // ---------------------------------------------------------------------------
 
 /**
- * JSON Schema passed to Gemini's `responseSchema` config property.
- * Typed as `Schema` from the SDK for guaranteed compatibility.
- * Do NOT use `as const` — the SDK expects mutable property types.
+ * JSON Schema for Gemini's `responseSchema`.
+ *
+ * Uses string literals ("OBJECT", "STRING", "NUMBER") instead of
+ * importing the `Type` enum, for maximum compatibility across SDK versions.
+ * The Gemini REST API accepts these strings directly.
  */
-const TRANSACTION_RESPONSE_SCHEMA: Schema = {
-    type: Type.OBJECT,
+const TRANSACTION_RESPONSE_SCHEMA = {
+    type: "OBJECT",
     properties: {
         intent: {
-            type: Type.STRING,
+            type: "STRING",
             enum: ["record_transaction", "query", "system_command", "unknown"],
             description: "Classified intent of the user message",
         },
         transaction_data: {
-            type: Type.OBJECT,
+            type: "OBJECT",
             description: "Only populated when intent is record_transaction",
             nullable: true,
             properties: {
                 type: {
-                    type: Type.STRING,
+                    type: "STRING",
                     enum: ["income", "expense", "transfer"],
                     description: "Type of financial transaction",
                 },
                 amount: {
-                    type: Type.NUMBER,
+                    type: "NUMBER",
                     description: "Transaction amount as a positive number",
                 },
                 description: {
-                    type: Type.STRING,
+                    type: "STRING",
                     description: "Brief description of the transaction",
                 },
                 category: {
-                    type: Type.STRING,
+                    type: "STRING",
                     description: "Inferred category (comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, otros)",
                 },
                 account: {
-                    type: Type.STRING,
+                    type: "STRING",
                     description: "Payment method or account (Efectivo, MercadoPago, Banco, Tarjeta, etc.)",
                 },
             },
             required: ["type", "amount", "description", "category", "account"],
         },
         reply_message: {
-            type: Type.STRING,
+            type: "STRING",
             description: "Friendly reply for the user when intent is NOT record_transaction, or a confirmation hint when it is",
         },
     },
@@ -222,22 +223,20 @@ export async function parseTransaction(
         }
     }
 
-    const regexResult = parseExpenseRegex(message);
-    if (regexResult) {
-        return regexToParsedIntent(regexResult);
-    }
-
+    // LLM available → always prefer it (classifies income/expense/transfer correctly)
     if (geminiKey) {
         try {
             return await parseWithLLM(message, geminiKey);
         } catch (err) {
             console.error("[SUMA] LLM parsing failed:", err);
-            return {
-                intent: "unknown",
-                transaction_data: null,
-                reply_message: "🤔 Hubo un problema procesando tu mensaje. Probá de nuevo.",
-            };
+            // LLM failed → fall through to regex as safety net
         }
+    }
+
+    // Regex fallback — only catches expenses (no API key, or LLM failed)
+    const regexResult = parseExpenseRegex(message);
+    if (regexResult) {
+        return regexToParsedIntent(regexResult);
     }
 
     return {
