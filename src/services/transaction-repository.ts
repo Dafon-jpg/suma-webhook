@@ -1,7 +1,6 @@
 // ============================================================================
 // Transaction Repository — CRUD operations against Supabase
 //
-// Sección 2: Replaces expense-repository.ts
 // Supports income, expense, and transfer operations with accounts.
 // ============================================================================
 
@@ -10,11 +9,10 @@ import type {
     TransactionRow,
     AccountRow,
     UserInfo,
-    ParsedExpense,
 } from "../types/index.js";
 
 // ---------------------------------------------------------------------------
-// User operations (unchanged from expense-repository)
+// User operations
 // ---------------------------------------------------------------------------
 
 /**
@@ -33,7 +31,7 @@ export async function upsertUser(
             { phone, name: name ?? null },
             { onConflict: "phone" }
         )
-        .select("id, is_subscribed, email, spreadsheet_id, spreadsheet_url")
+        .select("id, name, is_subscribed, subscription_status, email")
         .single();
 
     if (error) {
@@ -41,29 +39,76 @@ export async function upsertUser(
         throw new Error(`Failed to upsert user: ${error.message}`);
     }
 
+    // Dual check temporario: subscription_status es la fuente de verdad,
+    // pero is_subscribed se mantiene como fallback hasta deprecar
+    const subscriptionStatus = data.subscription_status ?? "none";
+    const isSubscribed = subscriptionStatus === "active" || data.is_subscribed === true;
+
     return {
         id: data.id,
-        isSubscribed: data.is_subscribed ?? false,
+        name: data.name ?? null,
+        isSubscribed,
+        subscriptionStatus,
         email: data.email ?? null,
-        spreadsheetId: data.spreadsheet_id ?? null,
-        spreadsheetUrl: data.spreadsheet_url ?? null,
     };
 }
 
 // ---------------------------------------------------------------------------
-// Category operations (unchanged)
+// Category operations
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves a category name to its UUID. Creates if it doesn't exist.
+ * Resolves a category name to its UUID.
+ * If userId is provided, searches user-specific categories first, then global.
+ * Creates a new category if it doesn't exist (user-specific if userId is given).
  */
-export async function resolveCategoryId(categoryName: string): Promise<string> {
+export async function resolveCategoryId(
+    categoryName: string,
+    userId?: string,
+): Promise<string> {
     const supabase = getSupabaseClient();
 
+    if (userId) {
+        // Buscar categoría del usuario primero
+        const { data: userCat } = await supabase
+            .from("categories")
+            .select("id")
+            .eq("name", categoryName)
+            .eq("user_id", userId)
+            .single();
+
+        if (userCat) return userCat.id as string;
+
+        // Buscar categoría global
+        const { data: globalCat } = await supabase
+            .from("categories")
+            .select("id")
+            .eq("name", categoryName)
+            .is("user_id", null)
+            .single();
+
+        if (globalCat) return globalCat.id as string;
+
+        // Crear categoría personalizada del usuario
+        const { data: created, error } = await supabase
+            .from("categories")
+            .insert({ name: categoryName, user_id: userId })
+            .select("id")
+            .single();
+
+        if (error) {
+            throw new Error(`Failed to create category "${categoryName}": ${error.message}`);
+        }
+
+        return created!.id as string;
+    }
+
+    // Sin userId: busca global, crea global
     const { data: existing } = await supabase
         .from("categories")
         .select("id")
         .eq("name", categoryName)
+        .is("user_id", null)
         .single();
 
     if (existing) return existing.id as string;
@@ -82,7 +127,7 @@ export async function resolveCategoryId(categoryName: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Account operations (NEW)
+// Account operations
 // ---------------------------------------------------------------------------
 
 /**
@@ -155,7 +200,7 @@ export async function getUserAccounts(userId: string): Promise<AccountRow[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction operations (replaces insertExpense)
+// Transaction operations
 // ---------------------------------------------------------------------------
 
 /**
@@ -182,65 +227,27 @@ export async function insertTransaction(
 }
 
 /**
- * Bridge function: takes old ParsedExpense output and saves it as a transaction.
- * This is the main function called by process-message.ts during the transition
- * period while the parser still returns ParsedExpense.
- *
- * Automatically:
- *  - Sets type to 'expense'
- *  - Assigns the user's default account
- *  - Resolves the category
+ * Counts transactions for a user in the current month.
+ * Excludes soft-deleted transactions (deleted_at IS NOT NULL).
  */
-export async function saveExpenseAsTransaction(params: {
-    userId: string;
-    parsed: ParsedExpense;
-    rawMessage: string;
-}): Promise<TransactionRow> {
-    const { userId, parsed, rawMessage } = params;
+export async function getMonthlyTransactionCount(userId: string): Promise<number> {
+    const supabase = getSupabaseClient();
 
-    // Resolve account and category in parallel
-    const [accountId, categoryId] = await Promise.all([
-        ensureDefaultAccount(userId),
-        resolveCategoryId(parsed.category),
-    ]);
+    // date_trunc('month', now()) en Supabase se logra con un filtro manual
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-    return insertTransaction({
-        user_id: userId,
-        type: "expense",
-        amount: parsed.amount,
-        description: parsed.description,
-        category_id: categoryId,
-        account_id: accountId,
-        is_recurrent: false,
-        raw_message: rawMessage,
-    });
-}
+    const { count, error } = await supabase
+        .from("transactions")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .gte("created_at", firstOfMonth)
+        .is("deleted_at", null);
 
-// ---------------------------------------------------------------------------
-// Backward compatibility — @deprecated
-// ---------------------------------------------------------------------------
+    if (error) {
+        console.error("[SUMA] Failed to count monthly transactions:", error);
+        throw new Error(`Failed to count transactions: ${error.message}`);
+    }
 
-/**
- * @deprecated Use saveExpenseAsTransaction instead.
- * Kept temporarily so old code paths don't break during migration.
- */
-export async function insertExpense(expense: {
-    user_id: string;
-    amount: number;
-    description: string;
-    category_id: string;
-    raw_message?: string;
-}): Promise<TransactionRow> {
-    const accountId = await ensureDefaultAccount(expense.user_id);
-
-    return insertTransaction({
-        user_id: expense.user_id,
-        type: "expense",
-        amount: expense.amount,
-        description: expense.description,
-        category_id: expense.category_id,
-        account_id: accountId,
-        is_recurrent: false,
-        raw_message: expense.raw_message ?? null,
-    });
+    return count ?? 0;
 }

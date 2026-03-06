@@ -3,6 +3,7 @@
 //
 // Sección 2: Ledger model (accounts + transactions)
 // Sección 3: Intent router & transaction parser
+// Fase 1: Subscriptions, chat sessions, pending confirmations
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -14,11 +15,12 @@ export type TransactionType = "income" | "expense" | "transfer";
 export type AccountType = "cash" | "bank" | "digital_wallet" | "credit_card";
 
 // ---------------------------------------------------------------------------
-// Intent Router enums (Sección 3)
+// Intent Router enums (Sección 3 + Fase 1)
 // ---------------------------------------------------------------------------
 
 export type IntentType =
   | "record_transaction"
+  | "subscription"
   | "query"
   | "system_command"
   | "unknown";
@@ -53,11 +55,49 @@ export interface TransactionRow {
   installment_current?: number | null;
   installment_total?: number | null;
   raw_message?: string | null;
+  deleted_at?: string | null;              // Soft delete (undo)
   created_at?: string;
 }
 
+/** Row in the `subscriptions` table */
+export interface SubscriptionRow {
+  id: string;
+  user_id: string;
+  account_id: string;
+  service_name: string;
+  amount: number;
+  currency: string;
+  frequency: string;
+  next_payment_at: string;
+  category_id: string | null;
+  notes: string | null;
+  is_active: boolean;
+  cancelled_at: string | null;
+  created_at: string;
+}
+
+/** Row in the `pending_confirmations` table */
+export interface PendingConfirmationRow {
+  id: string;
+  user_id: string;
+  transaction_data: ParsedTransactionData | ParsedSubscription;
+  confirmation_type: "transaction" | "subscription";
+  field_editing: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+/** Row in the `chat_sessions` table */
+export interface ChatMessage {
+  id: string;
+  user_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
-// Parser output types (Sección 3 — replaces ParsedExpense)
+// Parser output types (Sección 3)
 // ---------------------------------------------------------------------------
 
 /**
@@ -73,34 +113,26 @@ export interface ParsedTransactionData {
 }
 
 /**
- * Full structured response from the transaction parser (LLM or regex+wrapper).
+ * Subscription data extracted by the LLM when intent is "subscription".
+ */
+export interface ParsedSubscription {
+  intent: "subscription";
+  service_name: string;
+  amount: number;
+  currency: "ARS" | "USD";
+  frequency: "monthly" | "annual" | "weekly";
+  account: string;
+  start_date: string; // ISO date string
+}
+
+/**
+ * Full structured response from the transaction parser (LLM).
  * This is the single contract between the parser and the orchestrator.
  */
 export interface ParsedIntent {
   intent: IntentType;
   transaction_data: ParsedTransactionData | null;
   reply_message: string;
-}
-
-/**
- * @deprecated Use ParsedTransactionData instead.
- * Kept for backward compatibility during migration (regex parser still uses this shape).
- */
-export interface ParsedExpense {
-  amount: number;
-  description: string;
-  category: string;
-}
-
-/**
- * @deprecated Use TransactionRow instead.
- */
-export interface ExpenseRow {
-  user_id: string;
-  amount: number;
-  description: string;
-  category_id: string;
-  raw_message?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,10 +142,10 @@ export interface ExpenseRow {
 /** User info returned by upsertUser */
 export interface UserInfo {
   id: string;
-  isSubscribed: boolean;
+  name: string | null;
+  isSubscribed: boolean;             // Computed: subscriptionStatus === 'active'
+  subscriptionStatus: "none" | "pending" | "active" | "cancelled";
   email: string | null;
-  spreadsheetId: string | null;
-  spreadsheetUrl: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +201,11 @@ export interface WhatsAppMessage {
   text?: { body: string };
   audio?: { id: string; mime_type: string };
   image?: { id: string; mime_type: string; caption?: string };
+  interactive?: {
+    type: string;
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string; description?: string };
+  };
 }
 
 export interface QueuedMessagePayload {

@@ -4,25 +4,17 @@
 // Strategy:
 //   1. Media present → call Gemini directly (needs multimodal)
 //   2. Text + API key → call Gemini (classifies intent + extracts data)
-//   3. Text + no API key (or LLM failed) → regex fallback (expenses only)
+//   3. No API key or LLM failed → return unknown
 //
 // Uses `responseSchema` to enforce a strict JSON contract.
 // ============================================================================
 
 import type {
     ParsedIntent,
-    ParsedExpense,
     MediaContent,
 } from "../types/index.js";
 import { GoogleGenAI } from "@google/genai";
 import type { Part } from "@google/genai";
-
-// ---------------------------------------------------------------------------
-// Re-export regex parser (kept as fast-path for obvious expenses)
-// ---------------------------------------------------------------------------
-
-export { parseExpenseRegex } from "./expense-parser.js";
-import { parseExpenseRegex } from "./expense-parser.js";
 
 // Diagnostic — if you don't see this, the module crashed on import
 console.log("[SUMA] ✅ transaction-parser module loaded");
@@ -175,24 +167,6 @@ async function parseWithLLM(
 }
 
 // ---------------------------------------------------------------------------
-// Regex → ParsedIntent bridge
-// ---------------------------------------------------------------------------
-
-function regexToParsedIntent(regexResult: ParsedExpense): ParsedIntent {
-    return {
-        intent: "record_transaction",
-        transaction_data: {
-            type: "expense",
-            amount: regexResult.amount,
-            description: regexResult.description,
-            category: regexResult.category,
-            account: "Efectivo",
-        },
-        reply_message: "",
-    };
-}
-
-// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -229,16 +203,10 @@ export async function parseTransaction(
             return await parseWithLLM(message, geminiKey);
         } catch (err) {
             console.error("[SUMA] LLM parsing failed:", err);
-            // LLM failed → fall through to regex as safety net
         }
     }
 
-    // Regex fallback — only catches expenses (no API key, or LLM failed)
-    const regexResult = parseExpenseRegex(message);
-    if (regexResult) {
-        return regexToParsedIntent(regexResult);
-    }
-
+    // No LLM available or LLM failed — return unknown
     return {
         intent: "unknown",
         transaction_data: null,
