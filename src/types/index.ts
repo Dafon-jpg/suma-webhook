@@ -132,6 +132,7 @@ export interface ParsedSubscription {
 export interface ParsedIntent {
   intent: IntentType;
   transaction_data: ParsedTransactionData | null;
+  subscription_data?: ParsedSubscription | null;
   reply_message: string;
 }
 

@@ -2,7 +2,7 @@
 // WhatsApp Cloud API — send messages back to the user
 // ============================================================================
 
-import type { ParsedTransactionData, TransactionType } from "../types/index.js";
+import type { ParsedTransactionData, ParsedSubscription, TransactionType } from "../types/index.js";
 
 const WA_API_BASE = "https://graph.facebook.com/v21.0";
 
@@ -11,6 +11,38 @@ interface SendMessageParams {
   text: string;
   phoneNumberId: string;
   apiToken: string;
+}
+
+// ---------------------------------------------------------------------------
+// Generic WhatsApp API caller (private)
+// ---------------------------------------------------------------------------
+
+async function callWhatsAppAPI(params: {
+  phoneNumberId: string;
+  apiToken: string;
+  to: string;
+  body: Record<string, unknown>;
+}): Promise<void> {
+  const url = `${WA_API_BASE}/${params.phoneNumberId}/messages`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: params.to,
+      ...params.body,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    console.error(`[SUMA] ❌ WhatsApp API error (${res.status}):`, errBody);
+    throw new Error(`WhatsApp send failed: ${res.status}`);
+  }
 }
 
 /**
@@ -121,4 +153,226 @@ export function formatHelpMessage(): string {
     ``,
     `_También podés escribir "resumen" o "ayuda"._`,
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Interactive message senders (Fase 2 — confirmation flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends a simple text message via callWhatsAppAPI.
+ */
+export async function sendSimpleText(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  text: string;
+}): Promise<void> {
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "text",
+      text: { body: params.text },
+    },
+  });
+}
+
+/**
+ * Sends a confirmation message with "Sí, confirmar" / "No, corregir" buttons.
+ */
+export async function sendConfirmationButtons(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  summaryText: string;
+  confirmationId: string;
+}): Promise<void> {
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: params.summaryText },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: `confirm_yes_${params.confirmationId}`,
+                title: "✅ Sí, confirmar",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: `confirm_no_${params.confirmationId}`,
+                title: "❌ No, corregir",
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Sends a post-confirmation message with an "Undo" button after saving.
+ */
+export async function sendPostConfirmationButtons(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  summaryText: string;
+  transactionId: string;
+}): Promise<void> {
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: params.summaryText },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: `undo_${params.transactionId}`,
+                title: "❌ Deshacer",
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Sends a list message for field selection during correction flow.
+ */
+export async function sendFieldSelectionList(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  confirmationId: string;
+  fields: Array<{ id: string; title: string; description: string }>;
+}): Promise<void> {
+  const rows = params.fields.map((field) => ({
+    id: `field_${field.id}_${params.confirmationId}`.slice(0, 200),
+    title: field.title,
+    description: field.description,
+  }));
+
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "interactive",
+      interactive: {
+        type: "list",
+        header: { type: "text", text: "¿Qué dato es incorrecto?" },
+        body: { text: "Seleccioná el campo que querés corregir:" },
+        action: {
+          button: "Ver campos",
+          sections: [
+            {
+              title: "Campos",
+              rows,
+            },
+          ],
+        },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Summary builders (for confirmation messages)
+// ---------------------------------------------------------------------------
+
+const TYPE_DISPLAY: Record<TransactionType, string> = {
+  expense: "Gasto",
+  income: "Ingreso",
+  transfer: "Transferencia",
+};
+
+const FREQUENCY_DISPLAY: Record<string, string> = {
+  monthly: "Mensual",
+  annual: "Anual",
+  weekly: "Semanal",
+};
+
+function formatARS(amount: number): string {
+  return amount.toLocaleString("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    minimumFractionDigits: 0,
+  });
+}
+
+/**
+ * Builds a summary text for transaction confirmation.
+ */
+export function buildTransactionSummary(data: ParsedTransactionData): string {
+  return [
+    `¿Registramos este movimiento?\n`,
+    `💸 *Tipo:* ${TYPE_DISPLAY[data.type]}`,
+    `💰 *Monto:* ${formatARS(data.amount)}`,
+    `💵 *Moneda:* ARS`,
+    `🏦 *Cuenta:* ${data.account}`,
+    `📝 *Descripción:* ${data.description}`,
+    `🏷️ *Categoría:* ${data.category}`,
+  ].join("\n");
+}
+
+/**
+ * Builds a summary text for subscription confirmation.
+ */
+export function buildSubscriptionSummary(data: ParsedSubscription): string {
+  return [
+    `¿Registramos esta suscripción?\n`,
+    `🔄 *Servicio:* ${data.service_name}`,
+    `💰 *Monto:* ${formatARS(data.amount)}`,
+    `📅 *Frecuencia:* ${FREQUENCY_DISPLAY[data.frequency] ?? data.frequency}`,
+    `🏦 *Cuenta:* ${data.account}`,
+  ].join("\n");
+}
+
+/**
+ * Builds the field list for transaction correction flow.
+ */
+export function buildFieldList(
+  data: ParsedTransactionData,
+): Array<{ id: string; title: string; description: string }> {
+  return [
+    { id: "type", title: "Tipo", description: `Actualmente: ${TYPE_DISPLAY[data.type]}` },
+    { id: "amount", title: "Monto", description: `Actualmente: ${formatARS(data.amount)}` },
+    { id: "currency", title: "Moneda", description: "Actualmente: ARS" },
+    { id: "account", title: "Cuenta", description: `Actualmente: ${data.account}` },
+    { id: "description", title: "Descripción", description: `Actualmente: ${data.description}` },
+    { id: "category", title: "Categoría", description: `Actualmente: ${data.category}` },
+  ];
+}
+
+/**
+ * Builds the field list for subscription correction flow.
+ */
+export function buildSubscriptionFieldList(
+  data: ParsedSubscription,
+): Array<{ id: string; title: string; description: string }> {
+  return [
+    { id: "service_name", title: "Servicio", description: `Actualmente: ${data.service_name}` },
+    { id: "frequency", title: "Frecuencia", description: `Actualmente: ${FREQUENCY_DISPLAY[data.frequency] ?? data.frequency}` },
+    { id: "amount", title: "Monto", description: `Actualmente: ${formatARS(data.amount)}` },
+  ];
 }

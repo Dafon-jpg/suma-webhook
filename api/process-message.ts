@@ -18,7 +18,7 @@ import type {
     WhatsAppMessage,
     MediaContent,
     ParsedIntent,
-    ParsedTransactionData,
+    ChatMessage,
 } from "../src/types/index.js";
 import { loadConfig } from "../src/utils/config.js";
 import { verifyQStashSignature } from "../src/queue/qstash.js";
@@ -31,15 +31,23 @@ import { parseTransaction } from "../src/services/transaction-parser.js";
 import { downloadWhatsAppMedia } from "../src/services/whatsapp-media.js";
 import {
     upsertUser,
-    insertTransaction,
-    resolveCategoryId,
-    ensureDefaultAccount,
+    getMonthlyTransactionCount,
 } from "../src/services/transaction-repository.js";
 import {
-    sendWhatsAppMessage,
-    formatTransactionSuccess,
-    formatHelpMessage,
+    sendSimpleText,
+    sendPostConfirmationButtons,
 } from "../src/services/whatsapp.js";
+import {
+    createPending,
+    getPending,
+    sendConfirmation,
+    confirmAndSave,
+    startFieldCorrection,
+    selectFieldToEdit,
+    applyFieldCorrection,
+} from "../src/services/confirmation-flow.js";
+import { getRecentHistory, saveMessage } from "../src/services/chat-memory.js";
+import { getSupabaseClient } from "../src/lib/supabase.js";
 import type { IncomingMessage } from "node:http";
 
 // Diagnostic: if you don't see this in logs, the module failed to load
@@ -197,7 +205,7 @@ async function extractContent(
 }
 
 // ---------------------------------------------------------------------------
-// Message processing pipeline — intent-based routing
+// Message processing pipeline — Fase 1: full conversational flow
 // ---------------------------------------------------------------------------
 
 async function processMessage(
@@ -210,7 +218,7 @@ async function processMessage(
         apiToken: config.WHATSAPP_API_TOKEN,
     };
 
-    // ── Extract text and media from the message ─────────────────────────
+    // ── PASO 1: Extraer contenido ───────────────────────────────────────
     const { text, media, rawLabel } = await extractContent(msg, config.WHATSAPP_API_TOKEN);
 
     if (text === null && !media) {
@@ -218,13 +226,77 @@ async function processMessage(
         return;
     }
 
+    // ── PASO 2: Detectar si es respuesta interactiva ────────────────────
+    if (msg.type === "interactive") {
+        await handleInteractiveReply(msg, userPhone, sendParams);
+        return;
+    }
+
     console.log(`[SUMA] 📩 Processing ${msg.type} from ${userPhone}: "${text ?? "[media]"}"`);
 
-    // ── Run the intent parser ───────────────────────────────────────────
+    // ── PASO 3: upsertUser ──────────────────────────────────────────────
+    const user = await upsertUser(userPhone);
+
+    // ── PASO 4: Check si usuario está suscripto ─────────────────────────
+    if (user.subscriptionStatus !== "active" && !user.isSubscribed) {
+        await sendSimpleText({
+            to: userPhone,
+            ...sendParams,
+            text: "¡Hola! 👋 Soy Suma, tu asistente financiero por WhatsApp.\n\n" +
+                "Para usar todas mis funciones necesitás una cuenta activa.\n" +
+                "Registrate en 👉 https://suma.digital",
+        });
+        await saveMessage(user.id, "user", text ?? rawLabel);
+        await saveMessage(user.id, "assistant", "[Mensaje de invitación a suscribirse]");
+        return;
+    }
+
+    // ── PASO 5: Check si hay pending_confirmation con field_editing ──────
+    const pending = await getPending(user.id);
+    if (pending !== null && pending.field_editing !== null) {
+        await applyFieldCorrection(pending.id, text ?? "", userPhone, sendParams);
+        await saveMessage(user.id, "user", text ?? rawLabel);
+        await saveMessage(user.id, "assistant", "[Confirmación actualizada]");
+        return;
+    }
+
+    // ── PASO 6: Onboarding para usuarios nuevos ─────────────────────────
+    if (user.name === null) {
+        await saveMessage(user.id, "system", "Usuario nuevo suscripto. Iniciar onboarding.");
+        await sendSimpleText({
+            to: userPhone,
+            ...sendParams,
+            text: "¡Hola! 👋 Soy Suma, tu asistente financiero.\n\n" +
+                "Puedo ayudarte a llevar el control de tus finanzas. " +
+                "Decime cosas como:\n" +
+                '• _"Cobré 250.000 de un freelance"_\n' +
+                '• _"Gasté 15.000 en el super"_\n' +
+                '• _"Me suscribí a Netflix"_\n\n' +
+                "Antes de guardar cualquier movimiento, te voy a pedir que confirmes los datos. " +
+                "Así nunca se registra nada mal 😊\n\n" +
+                "¿Cómo te llamás?",
+        });
+        await saveMessage(user.id, "assistant", "[Onboarding iniciado]");
+        return;
+    }
+
+    // ── PASO 7: Cargar contexto para Gemini ─────────────────────────────
+    const [history, monthlyCount] = await Promise.all([
+        getRecentHistory(user.id),
+        getMonthlyTransactionCount(user.id),
+    ]);
+
+    // ── PASO 8: Llamar a Gemini NLU ─────────────────────────────────────
     const parsed: ParsedIntent = await parseTransaction(
         text ?? "",
-        config.GEMINI_API_KEY,
-        media,
+        config.GEMINI_API_KEY!,
+        {
+            media,
+            userName: user.name ?? undefined,
+            subscriptionStatus: user.subscriptionStatus,
+            monthlyTxCount: monthlyCount,
+            conversationHistory: history,
+        },
     );
 
     const intentLog = parsed.transaction_data
@@ -232,81 +304,233 @@ async function processMessage(
         : "";
     console.log(`[SUMA] 🧠 Intent: ${parsed.intent} ${intentLog}`);
 
-    // ── Route by intent ─────────────────────────────────────────────────
+    // Guardar mensaje del usuario en historial
+    await saveMessage(user.id, "user", text ?? rawLabel);
+
+    // ── PASO 9: Routing por intent ──────────────────────────────────────
     switch (parsed.intent) {
-        case "record_transaction":
-            await handleRecordTransaction(
-                userPhone,
-                parsed.transaction_data!,
-                rawLabel,
-                sendParams,
-            );
+        case "record_transaction": {
+            if (!parsed.transaction_data) {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "⚠️ No pude interpretar los datos. Probá de nuevo.",
+                });
+                await saveMessage(user.id, "assistant", "[Error: sin datos de transacción]");
+                break;
+            }
+            await createPending(user.id, parsed.transaction_data, "transaction");
+            const pendingRow = await getPending(user.id);
+            await sendConfirmation(pendingRow!, userPhone, sendParams);
+            await saveMessage(user.id, "assistant", "[Confirmación enviada]");
             break;
+        }
+
+        case "subscription": {
+            if (!parsed.subscription_data) {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "⚠️ No pude interpretar los datos de la suscripción. Probá de nuevo.",
+                });
+                await saveMessage(user.id, "assistant", "[Error: sin datos de suscripción]");
+                break;
+            }
+            await createPending(user.id, parsed.subscription_data, "subscription");
+            const subPending = await getPending(user.id);
+            await sendConfirmation(subPending!, userPhone, sendParams);
+            await saveMessage(user.id, "assistant", "[Confirmación de suscripción enviada]");
+            break;
+        }
 
         case "query":
-            await sendWhatsAppMessage({
-                to: userPhone,
-                text: parsed.reply_message || "📊 La funcionalidad de consultas estará disponible pronto.",
-                ...sendParams,
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: parsed.reply_message || "📊 Las consultas financieras van a estar disponibles pronto.",
             });
+            await saveMessage(user.id, "assistant", parsed.reply_message || "[Consulta]");
             break;
 
         case "system_command":
-            await sendWhatsAppMessage({
-                to: userPhone,
-                text: parsed.reply_message || formatHelpMessage(),
-                ...sendParams,
-            });
+            if (parsed.reply_message === "undo") {
+                await handleUndo(user.id, userPhone, sendParams);
+            } else {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: parsed.reply_message || 'Escribí _"ayuda"_ para ver qué puedo hacer.',
+                });
+            }
+            await saveMessage(user.id, "assistant", parsed.reply_message || "[Comando de sistema]");
             break;
 
         case "unknown":
-        default:
-            await sendWhatsAppMessage({
-                to: userPhone,
-                text: parsed.reply_message || formatHelpMessage(),
-                ...sendParams,
-            });
+        default: {
+            // Detectar si el usuario está respondiendo a "¿Cómo te llamás?"
+            const lastAssistantMsg = history
+                .filter((m: ChatMessage) => m.role === "assistant")
+                .pop();
+
+            if (lastAssistantMsg?.content?.includes("¿Cómo te llamás?")) {
+                await updateUserName(user.id, text ?? "");
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: `¡Encantado, ${text}! 😊 Ya estás listo para empezar.\n\n` +
+                        'Probá escribirme algo como _"Gasté 5000 en pizza"_',
+                });
+                await saveMessage(user.id, "assistant", `[Nombre guardado: ${text}]`);
+            } else {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: parsed.reply_message || '🤔 No entendí. Probá con algo como _"Gasté 5000 en pizza"_',
+                });
+                await saveMessage(user.id, "assistant", parsed.reply_message || "[No entendido]");
+            }
             break;
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Intent handler: record_transaction
+// Interactive reply handler — buttons & lists
 // ---------------------------------------------------------------------------
 
-async function handleRecordTransaction(
+async function handleInteractiveReply(
+    msg: WhatsAppMessage,
     userPhone: string,
-    data: ParsedTransactionData,
-    rawMessage: string,
     sendParams: SendParams,
 ): Promise<void> {
-    const userInfo = await upsertUser(userPhone);
+    const buttonReply = msg.interactive?.button_reply;
+    const listReply = msg.interactive?.list_reply;
 
-    const [accountId, categoryId] = await Promise.all([
-        ensureDefaultAccount(userInfo.id),
-        resolveCategoryId(data.category),
-    ]);
+    if (!buttonReply && !listReply) return;
 
-    await insertTransaction({
-        user_id: userInfo.id,
-        type: data.type,
-        amount: data.amount,
-        description: data.description,
-        category_id: categoryId,
-        account_id: accountId,
-        is_recurrent: false,
-        raw_message: rawMessage,
+    const replyId = buttonReply?.id ?? listReply?.id ?? "";
+    const user = await upsertUser(userPhone);
+
+    console.log(`[SUMA] 🔘 Interactive reply from ${userPhone}: "${replyId}"`);
+
+    // ── Confirmar transacción (Sí) ──
+    if (replyId.startsWith("confirm_yes_")) {
+        const confirmationId = replyId.replace("confirm_yes_", "");
+        try {
+            const result = await confirmAndSave(confirmationId, user.id);
+            await sendPostConfirmationButtons({
+                to: userPhone, ...sendParams,
+                summaryText: "✅ *Registrado*\n\n" + result.summary,
+                transactionId: result.transactionId,
+            });
+            await saveMessage(user.id, "user", "[Confirmó: Sí]");
+            await saveMessage(user.id, "assistant", "[Transacción guardada]");
+        } catch {
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "⚠️ Esa confirmación ya expiró. Escribí de nuevo tu movimiento.",
+            });
+        }
+        return;
+    }
+
+    // ── Rechazar y corregir (No) ──
+    if (replyId.startsWith("confirm_no_")) {
+        const confirmationId = replyId.replace("confirm_no_", "");
+        await startFieldCorrection(confirmationId, userPhone, sendParams);
+        await saveMessage(user.id, "user", "[Confirmó: No, quiere corregir]");
+        return;
+    }
+
+    // ── Selección de campo a corregir ──
+    if (replyId.startsWith("field_")) {
+        // Patrón: field_{fieldName}_{uuid}
+        // UUID siempre tiene 36 chars
+        const confirmationId = replyId.slice(-36);
+        const fieldName = replyId.slice(6, -(36 + 1)); // "field_" = 6 chars, "_" before UUID = 1
+        await selectFieldToEdit(confirmationId, fieldName, userPhone, sendParams);
+        await saveMessage(user.id, "user", `[Seleccionó campo: ${fieldName}]`);
+        return;
+    }
+
+    // ── Undo post-confirmación ──
+    if (replyId.startsWith("undo_")) {
+        const transactionId = replyId.replace("undo_", "");
+        await handleUndoById(user.id, transactionId, userPhone, sendParams);
+        await saveMessage(user.id, "user", "[Deshizo última transacción]");
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undo handlers
+// ---------------------------------------------------------------------------
+
+async function handleUndo(
+    userId: string,
+    phone: string,
+    sendParams: SendParams,
+): Promise<void> {
+    const supabase = getSupabaseClient();
+
+    const { data } = await supabase
+        .from("transactions")
+        .select("id, description, amount, type")
+        .eq("user_id", userId)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+    if (!data) {
+        await sendSimpleText({
+            to: phone, ...sendParams,
+            text: "No tenés transacciones para deshacer.",
+        });
+        return;
+    }
+
+    await supabase
+        .from("transactions")
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", data.id);
+
+    await sendSimpleText({
+        to: phone, ...sendParams,
+        text: `✅ Deshice el último registro: ${data.description} $${data.amount}`,
     });
+}
 
-    console.log(
-        `[SUMA] 💾 ${data.type} saved: $${data.amount} — ${data.description} [${data.category}]`,
-    );
+async function handleUndoById(
+    userId: string,
+    transactionId: string,
+    phone: string,
+    sendParams: SendParams,
+): Promise<void> {
+    const supabase = getSupabaseClient();
 
-    await sendWhatsAppMessage({
-        to: userPhone,
-        text: formatTransactionSuccess(data),
-        ...sendParams,
+    const { error } = await supabase
+        .from("transactions")
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", transactionId)
+        .eq("user_id", userId)
+        .is("deleted_at", null);
+
+    if (error) {
+        await sendSimpleText({
+            to: phone, ...sendParams,
+            text: "⚠️ No se pudo deshacer. Puede que ya fue eliminada.",
+        });
+        return;
+    }
+
+    await sendSimpleText({
+        to: phone, ...sendParams,
+        text: "✅ Transacción deshecha correctamente.",
     });
+}
+
+// ---------------------------------------------------------------------------
+// User helpers
+// ---------------------------------------------------------------------------
+
+async function updateUserName(userId: string, name: string): Promise<void> {
+    const supabase = getSupabaseClient();
+    await supabase.from("users").update({ name }).eq("id", userId);
 }
 
 // ---------------------------------------------------------------------------

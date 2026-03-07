@@ -2,16 +2,18 @@
 // Transaction Parser — Intent Router + Structured Output (Sección 3)
 //
 // Strategy:
-//   1. Media present → call Gemini directly (needs multimodal)
-//   2. Text + API key → call Gemini (classifies intent + extracts data)
-//   3. No API key or LLM failed → return unknown
+//   1. Build context string (user info + conversation history + message)
+//   2. Call Gemini with structured output schema
+//   3. Return ParsedIntent with transaction_data or subscription_data
 //
 // Uses `responseSchema` to enforce a strict JSON contract.
 // ============================================================================
 
 import type {
     ParsedIntent,
+    ParsedSubscription,
     MediaContent,
+    ChatMessage,
 } from "../types/index.js";
 import { GoogleGenAI } from "@google/genai";
 import type { Part } from "@google/genai";
@@ -20,22 +22,27 @@ import type { Part } from "@google/genai";
 console.log("[SUMA] ✅ transaction-parser module loaded");
 
 // ---------------------------------------------------------------------------
+// Parse options — context injected into the prompt
+// ---------------------------------------------------------------------------
+
+interface ParseOptions {
+    media?: MediaContent;
+    userName?: string;
+    subscriptionStatus?: string;
+    monthlyTxCount?: number;
+    conversationHistory?: ChatMessage[];
+}
+
+// ---------------------------------------------------------------------------
 // Gemini Structured Output Schema
 // ---------------------------------------------------------------------------
 
-/**
- * JSON Schema for Gemini's `responseSchema`.
- *
- * Uses string literals ("OBJECT", "STRING", "NUMBER") instead of
- * importing the `Type` enum, for maximum compatibility across SDK versions.
- * The Gemini REST API accepts these strings directly.
- */
 const TRANSACTION_RESPONSE_SCHEMA = {
     type: "OBJECT",
     properties: {
         intent: {
             type: "STRING",
-            enum: ["record_transaction", "query", "system_command", "unknown"],
+            enum: ["record_transaction", "subscription", "query", "system_command", "unknown"],
             description: "Classified intent of the user message",
         },
         transaction_data: {
@@ -58,65 +65,125 @@ const TRANSACTION_RESPONSE_SCHEMA = {
                 },
                 category: {
                     type: "STRING",
-                    description: "Inferred category (comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, otros)",
+                    description: "Inferred category",
                 },
                 account: {
                     type: "STRING",
-                    description: "Payment method or account (Efectivo, MercadoPago, Banco, Tarjeta, etc.)",
+                    description: "Payment method or account (Efectivo, MercadoPago, Banco, Tarjeta)",
                 },
             },
             required: ["type", "amount", "description", "category", "account"],
         },
+        subscription_data: {
+            type: "OBJECT",
+            description: "Only populated when intent is subscription",
+            nullable: true,
+            properties: {
+                service_name: {
+                    type: "STRING",
+                    description: "Name of the recurring service (Netflix, Spotify, gym, etc.)",
+                },
+                amount: {
+                    type: "NUMBER",
+                    description: "Subscription amount as a positive number (0 if unknown)",
+                },
+                currency: {
+                    type: "STRING",
+                    enum: ["ARS", "USD"],
+                    description: "Currency of the subscription",
+                },
+                frequency: {
+                    type: "STRING",
+                    enum: ["weekly", "monthly", "annual"],
+                    description: "Payment frequency",
+                },
+                account: {
+                    type: "STRING",
+                    description: "Payment method or account",
+                },
+                start_date: {
+                    type: "STRING",
+                    description: "ISO date (YYYY-MM-DD), default today",
+                },
+            },
+            required: ["service_name", "amount", "currency", "frequency", "account", "start_date"],
+        },
         reply_message: {
             type: "STRING",
-            description: "Friendly reply for the user when intent is NOT record_transaction, or a confirmation hint when it is",
+            description: "Friendly reply in Argentine Spanish for non-transaction intents, or a confirmation hint",
         },
     },
-    required: ["intent", "transaction_data", "reply_message"],
+    required: ["intent", "transaction_data", "subscription_data", "reply_message"],
 };
 
 // ---------------------------------------------------------------------------
-// System prompt — instructs Gemini on how to classify and extract
+// System prompt
 // ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT = `Sos SUMA, un asistente financiero personal por WhatsApp para usuarios argentinos.
+Analizá cada mensaje y clasificalo en UNA intención:
 
-Tu trabajo es analizar cada mensaje del usuario y clasificarlo en UNA de estas intenciones:
+1. "record_transaction" → Registrar ingreso, gasto o transferencia.
+   - Extraé: tipo (income/expense/transfer), monto, descripción, categoría, cuenta.
+   - Cobró/le pagaron/facturó/entró plata → "income". Gastó/pagó/compró → "expense". Transfirió/movió entre cuentas → "transfer".
+   - Sin cuenta mencionada → "Efectivo". Sin claridad ingreso/egreso → elegí el más probable.
+   - Categorías: comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, alquiler_cobrado, venta, dividendos, reembolso, otros, otros_ingresos.
+   - Monto SIEMPRE positivo. "5.000,50"=5000.50, "5k"=5000, "250 lucas"=250000.
 
-1. "record_transaction" → El usuario quiere registrar un ingreso, gasto o transferencia.
-   - Extraé: tipo (income/expense/transfer), monto, descripción, categoría y cuenta.
-   - Por defecto, asumí "expense" salvo que el usuario diga explícitamente que cobró, le pagaron, recibió plata, etc.
-   - Si el usuario menciona un método de pago (MercadoPago, efectivo, tarjeta, débito), ponelo en "account". Si no lo menciona, usá "Efectivo".
-   - Categorías válidas: comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, otros.
-   - El monto SIEMPRE debe ser positivo.
-   - Para transferencias, necesitás que el usuario mencione origen y destino.
+2. "subscription" → Suscripción o servicio recurrente (Netflix, Spotify, gym, etc.).
+   - Extraé: servicio, monto, frecuencia (monthly default), cuenta, start_date (hoy ISO default).
+   - Monto 0 si no lo dice.
 
-2. "query" → El usuario hace una pregunta sobre sus finanzas (ej: "¿cuánto gasté este mes?", "¿cuál es mi balance?").
-   - No extraigas transaction_data.
-   - Respondé en reply_message con algo como: "📊 La funcionalidad de consultas estará disponible pronto. ¡Estamos trabajando en ello!"
+3. "query" → Pregunta sobre finanzas. Respondé amablemente en reply_message.
 
-3. "system_command" → El usuario quiere ejecutar una acción del sistema (ej: "ayuda", "borrar el último", "resumen", "configurar").
-   - No extraigas transaction_data.
-   - Respondé en reply_message de forma útil. Para "ayuda", explicá brevemente cómo usar el bot.
+4. "system_command" → Acción: "ayuda"→explicá brevemente; "deshacer"/"borrar el último"→reply "undo"; otros→respondé útilmente.
 
-4. "unknown" → El mensaje no tiene relación con finanzas (saludos, chistes, preguntas generales).
-   - No extraigas transaction_data.
-   - Respondé amigablemente en reply_message, y recordale que sos un asistente financiero.
+5. "unknown" → Sin relación con finanzas. Respondé amigablemente, recordá que sos asistente financiero.
 
-REGLAS IMPORTANTES:
-- Si el mensaje es un audio transcripto que no se entiende bien, clasificá como "unknown" y pedí que lo repita.
-- Si hay una foto de un ticket/recibo, extraé el total y los ítems principales.
-- Los números argentinos usan punto como separador de miles y coma para decimales: "5.000,50" = 5000.50.
-- Siempre respondé en español argentino informal (vos, dale, etc.).
-- El campo transaction_data DEBE ser null cuando el intent NO es "record_transaction".
-- El campo reply_message siempre debe tener un valor (aunque sea una confirmación breve para transacciones).`;
+REGLAS:
+- Audio incomprensible → "unknown", pedí que repita.
+- Foto de ticket/recibo → extraé total como "expense".
+- transaction_data null si intent ≠ "record_transaction".
+- subscription_data null si intent ≠ "subscription".
+- reply_message siempre con valor.
+- Español argentino informal (vos, dale, tenés).`;
+
+// ---------------------------------------------------------------------------
+// Context builder — injects user info + history into the message
+// ---------------------------------------------------------------------------
+
+function buildContextMessage(message: string, options?: ParseOptions): string {
+    if (!options) return message;
+
+    const parts: string[] = [];
+
+    parts.push("[Contexto del usuario]");
+    parts.push(`Nombre: ${options.userName ?? "No registrado"}`);
+    parts.push(`Suscripción: ${options.subscriptionStatus ?? "none"}`);
+    parts.push(`Transacciones este mes: ${options.monthlyTxCount ?? 0}`);
+
+    if (options.conversationHistory && options.conversationHistory.length > 0) {
+        parts.push("");
+        parts.push("[Historial reciente]");
+        for (const msg of options.conversationHistory) {
+            const label = msg.role === "user" ? "Usuario" : "Suma";
+            parts.push(`${label}: ${msg.content}`);
+        }
+    }
+
+    parts.push("");
+    parts.push("[Mensaje actual]");
+    parts.push(message);
+
+    return parts.join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // LLM-based parser — Gemini with Structured Outputs
 // ---------------------------------------------------------------------------
 
 async function parseWithLLM(
-    message: string,
+    contextMessage: string,
     geminiKey: string,
     media?: MediaContent,
 ): Promise<ParsedIntent> {
@@ -134,7 +201,7 @@ async function parseWithLLM(
     }
 
     parts.push({
-        text: message || "Analizá el contenido multimedia adjunto.",
+        text: contextMessage || "Analizá el contenido multimedia adjunto.",
     });
 
     const result = await ai.models.generateContent({
@@ -151,14 +218,26 @@ async function parseWithLLM(
     const raw = result.text ?? "";
     const parsed: ParsedIntent = JSON.parse(raw);
 
+    // Enforce nullability rules
     if (parsed.intent !== "record_transaction") {
         parsed.transaction_data = null;
     }
 
+    if (parsed.intent !== "subscription") {
+        parsed.subscription_data = null;
+    }
+
+    // Add required `intent` field to subscription_data (not in Gemini schema)
+    if (parsed.intent === "subscription" && parsed.subscription_data) {
+        (parsed.subscription_data as ParsedSubscription).intent = "subscription";
+    }
+
+    // Validate amount for transactions
     if (parsed.transaction_data && parsed.transaction_data.amount <= 0) {
         return {
             intent: "unknown",
             transaction_data: null,
+            subscription_data: null,
             reply_message: "🤔 No pude identificar un monto válido. ¿Podés repetirlo con el monto?",
         };
     }
@@ -172,44 +251,24 @@ async function parseWithLLM(
 
 export async function parseTransaction(
     message: string,
-    geminiKey?: string,
-    media?: MediaContent,
+    geminiKey: string,
+    options?: ParseOptions,
 ): Promise<ParsedIntent> {
-    if (media) {
-        if (!geminiKey) {
-            console.error("[SUMA] Cannot process media without GEMINI_API_KEY");
-            return {
-                intent: "unknown",
-                transaction_data: null,
-                reply_message: "⚠️ No puedo procesar archivos multimedia en este momento.",
-            };
-        }
+    const contextMessage = buildContextMessage(message, options);
 
-        try {
-            return await parseWithLLM(message, geminiKey, media);
-        } catch (err) {
-            console.error("[SUMA] LLM parsing failed for media:", err);
-            return {
-                intent: "unknown",
-                transaction_data: null,
-                reply_message: "🤔 No pude procesar ese contenido. Probá enviándolo de nuevo.",
-            };
-        }
+    try {
+        return await parseWithLLM(contextMessage, geminiKey, options?.media);
+    } catch (err) {
+        const label = options?.media ? "media" : "text";
+        console.error(`[SUMA] ❌ LLM parsing failed for ${label}:`, err);
+
+        return {
+            intent: "unknown",
+            transaction_data: null,
+            subscription_data: null,
+            reply_message: options?.media
+                ? "🤔 No pude procesar ese contenido. Probá enviándolo de nuevo."
+                : "🤔 No entendí tu mensaje. Probá con algo como: _\"Gasté 5000 en pizza\"_",
+        };
     }
-
-    // LLM available → always prefer it (classifies income/expense/transfer correctly)
-    if (geminiKey) {
-        try {
-            return await parseWithLLM(message, geminiKey);
-        } catch (err) {
-            console.error("[SUMA] LLM parsing failed:", err);
-        }
-    }
-
-    // No LLM available or LLM failed — return unknown
-    return {
-        intent: "unknown",
-        transaction_data: null,
-        reply_message: "🤔 No entendí tu mensaje. Probá con algo como: _\"Gasté 5000 en pizza\"_",
-    };
 }
