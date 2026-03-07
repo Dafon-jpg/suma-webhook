@@ -25,31 +25,57 @@ export async function upsertUser(
 ): Promise<UserInfo> {
     const supabase = getSupabaseClient();
 
-    const { data, error } = await supabase
+    // Step 1: Try to find existing user
+    const { data: existing } = await supabase
         .from("users")
-        .upsert(
-            { phone, name: name ?? null },
-            { onConflict: "phone" }
-        )
+        .select("id, name, is_subscribed, subscription_status, email")
+        .eq("phone", phone)
+        .single();
+
+    if (existing) {
+        // Update name only if explicitly provided
+        if (name !== undefined) {
+            await supabase.from("users").update({ name }).eq("id", existing.id);
+            existing.name = name;
+        }
+
+        const subscriptionStatus = existing.subscription_status ?? "none";
+        const isSubscribed = subscriptionStatus === "active" || existing.is_subscribed === true;
+
+        console.log(`[SUMA] 👤 User found: ${existing.id}, subscription: ${subscriptionStatus}, isSubscribed: ${isSubscribed}`);
+
+        return {
+            id: existing.id,
+            name: existing.name ?? null,
+            isSubscribed,
+            subscriptionStatus,
+            email: existing.email ?? null,
+        };
+    }
+
+    // Step 2: User doesn't exist — create new
+    const { data: created, error: insertError } = await supabase
+        .from("users")
+        .insert({ phone, name: name ?? null })
         .select("id, name, is_subscribed, subscription_status, email")
         .single();
 
-    if (error) {
-        console.error("[SUMA] Supabase user upsert error:", error);
-        throw new Error(`Failed to upsert user: ${error.message}`);
+    if (insertError) {
+        console.error("[SUMA] Supabase user insert error:", insertError);
+        throw new Error(`Failed to create user: ${insertError.message}`);
     }
 
-    // Dual check temporario: subscription_status es la fuente de verdad,
-    // pero is_subscribed se mantiene como fallback hasta deprecar
-    const subscriptionStatus = data.subscription_status ?? "none";
-    const isSubscribed = subscriptionStatus === "active" || data.is_subscribed === true;
+    const subscriptionStatus = created.subscription_status ?? "none";
+    const isSubscribed = subscriptionStatus === "active" || created.is_subscribed === true;
+
+    console.log(`[SUMA] 👤 New user created: ${created.id}, subscription: ${subscriptionStatus}`);
 
     return {
-        id: data.id,
-        name: data.name ?? null,
+        id: created.id,
+        name: created.name ?? null,
         isSubscribed,
         subscriptionStatus,
-        email: data.email ?? null,
+        email: created.email ?? null,
     };
 }
 

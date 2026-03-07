@@ -238,6 +238,7 @@ async function processMessage(
     const user = await upsertUser(userPhone);
 
     // ── PASO 4: Check si usuario está suscripto ─────────────────────────
+    console.log(`[SUMA] 👤 User ${userPhone}: subscriptionStatus="${user.subscriptionStatus}", isSubscribed=${user.isSubscribed}`);
     if (user.subscriptionStatus !== "active" && !user.isSubscribed) {
         await sendSimpleText({
             to: userPhone,
