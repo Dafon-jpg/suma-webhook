@@ -65,7 +65,7 @@ const TRANSACTION_RESPONSE_SCHEMA = {
                 },
                 category: {
                     type: "STRING",
-                    description: "Inferred category (comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, otros)",
+                    description: "Inferred category (comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, alquiler_cobrado, venta, dividendos, reembolso, otros, otros_ingresos)",
                 },
                 account: {
                     type: "STRING",
@@ -127,7 +127,7 @@ Analizá cada mensaje y clasificalo en UNA intención:
    - Extraé: tipo (income/expense/transfer), monto, descripción, categoría, cuenta.
    - Cobró/le pagaron/facturó/entró plata → "income". Gastó/pagó/compró → "expense". Transfirió/movió entre cuentas → "transfer".
    - Sin cuenta mencionada → "Efectivo". Sin claridad ingreso/egreso → elegí el más probable.
-   - Categorías válidas: comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, otros.
+   - Categorías: comida, transporte, supermercado, entretenimiento, salud, educacion, servicios, ropa, sueldo, freelance, regalo, alquiler_cobrado, venta, dividendos, reembolso, otros, otros_ingresos.
    - Monto SIEMPRE positivo. "5.000,50"=5000.50, "5k"=5000, "250 lucas"=250000.
 
 2. "subscription" → Suscripción o servicio recurrente (Netflix, Spotify, gym, etc.).
