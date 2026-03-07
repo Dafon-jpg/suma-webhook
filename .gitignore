@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vercel/
+.env
+.env.local
+*.log
+docs/references/
+MASTER_PLAN.md
+PLAN_TOMAS.md
+.claude/
+CLAUDE.md

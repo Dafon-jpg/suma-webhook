@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "functions": {
+    "api/webhook.ts": {
+      "maxDuration": 10
+    },
+    "api/process-message.ts": {
+      "maxDuration": 60
+    }
+  }
+}
