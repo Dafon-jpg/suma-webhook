@@ -185,6 +185,7 @@ function buildContextMessage(message: string, options?: ParseOptions): string {
 async function parseWithLLM(
     contextMessage: string,
     geminiKey: string,
+    geminiModel: string,
     media?: MediaContent,
 ): Promise<ParsedIntent> {
     const ai = new GoogleGenAI({ apiKey: geminiKey });
@@ -205,7 +206,7 @@ async function parseWithLLM(
     });
 
     const result = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: geminiModel,
         config: {
             systemInstruction: SYSTEM_PROMPT,
             temperature: 0,
@@ -252,12 +253,13 @@ async function parseWithLLM(
 export async function parseTransaction(
     message: string,
     geminiKey: string,
+    geminiModel: string,
     options?: ParseOptions,
 ): Promise<ParsedIntent> {
     const contextMessage = buildContextMessage(message, options);
 
     try {
-        return await parseWithLLM(contextMessage, geminiKey, options?.media);
+        return await parseWithLLM(contextMessage, geminiKey, geminiModel, options?.media);
     } catch (err) {
         const label = options?.media ? "media" : "text";
         console.error(`[SUMA] ❌ LLM parsing failed for ${label}:`, err);

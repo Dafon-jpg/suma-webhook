@@ -231,6 +231,7 @@ export interface AppConfig {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   GEMINI_API_KEY?: string;
+  GEMINI_MODEL: string;
   QSTASH_TOKEN: string;
   QSTASH_CURRENT_SIGNING_KEY: string;
   QSTASH_NEXT_SIGNING_KEY: string;

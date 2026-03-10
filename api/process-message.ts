@@ -120,6 +120,9 @@ export default async function handler(
         const { message: msg } = payload;
         const userPhone = msg.from.replace(/^549/, "54");
 
+        // Extract WhatsApp profile name from contacts (if available)
+        const waProfileName = payload.contacts?.[0]?.profile?.name ?? null;
+
         console.log(`[SUMA] 📨 Message ${msg.id} from ${userPhone} (type: ${msg.type})`);
 
         // ── Step 3: Idempotency check ──────────────────────────────────
@@ -131,7 +134,7 @@ export default async function handler(
         }
 
         // ── Step 4: Process the message ────────────────────────────────
-        await processMessage(msg, userPhone, config);
+        await processMessage(msg, userPhone, config, waProfileName);
         await markMessageProcessed(msg.id);
         res.status(200).json({ status: "processed", wamid: msg.id });
 
@@ -212,6 +215,7 @@ async function processMessage(
     msg: WhatsAppMessage,
     userPhone: string,
     config: ReturnType<typeof loadConfig>,
+    waProfileName: string | null = null,
 ): Promise<void> {
     const sendParams: SendParams = {
         phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
@@ -263,6 +267,48 @@ async function processMessage(
 
     // ── PASO 6: Onboarding para usuarios nuevos ─────────────────────────
     if (user.name === null) {
+        // Check if the user is responding to "¿Cómo te llamás?"
+        const recentHistory = await getRecentHistory(user.id);
+        const lastAssistantMsg = recentHistory
+            .filter((m: ChatMessage) => m.role === "assistant")
+            .pop();
+
+        if (lastAssistantMsg?.content?.includes("¿Cómo te llamás?") || lastAssistantMsg?.content?.includes("Onboarding iniciado")) {
+            // User is replying with their name
+            const userName = text?.trim() ?? waProfileName ?? "Usuario";
+            await updateUserName(user.id, userName);
+            await sendSimpleText({
+                to: userPhone,
+                ...sendParams,
+                text: `¡Encantado, ${userName}! 😊 Ya estás listo para empezar.\n\n` +
+                    'Probá escribirme algo como _"Gasté 5000 en pizza"_',
+            });
+            await saveMessage(user.id, "user", text ?? rawLabel);
+            await saveMessage(user.id, "assistant", `[Nombre guardado: ${userName}]`);
+            return;
+        }
+
+        // First time — use WhatsApp profile name if available
+        if (waProfileName) {
+            await updateUserName(user.id, waProfileName);
+            await saveMessage(user.id, "system", `Nombre obtenido de WhatsApp: ${waProfileName}`);
+            await sendSimpleText({
+                to: userPhone,
+                ...sendParams,
+                text: `¡Hola ${waProfileName}! 👋 Soy Suma, tu asistente financiero.\n\n` +
+                    "Puedo ayudarte a llevar el control de tus finanzas. " +
+                    "Decime cosas como:\n" +
+                    '• _"Cobré 250.000 de un freelance"_\n' +
+                    '• _"Gasté 15.000 en el super"_\n' +
+                    '• _"Me suscribí a Netflix"_\n\n' +
+                    "Antes de guardar cualquier movimiento, te voy a pedir que confirmes los datos. " +
+                    "Así nunca se registra nada mal 😊",
+            });
+            await saveMessage(user.id, "assistant", "[Onboarding con nombre de WhatsApp]");
+            return;
+        }
+
+        // No WhatsApp name available — ask for it
         await saveMessage(user.id, "system", "Usuario nuevo suscripto. Iniciar onboarding.");
         await sendSimpleText({
             to: userPhone,
@@ -291,6 +337,7 @@ async function processMessage(
     const parsed: ParsedIntent = await parseTransaction(
         text ?? "",
         config.GEMINI_API_KEY!,
+        config.GEMINI_MODEL,
         {
             media,
             userName: user.name ?? undefined,
