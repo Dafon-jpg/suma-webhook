@@ -458,29 +458,71 @@ async function handleInteractiveReply(
     // ── Confirmar transacción (Sí) ──
     if (replyId.startsWith("confirm_yes_")) {
         const confirmationId = replyId.replace("confirm_yes_", "");
+
+        // Step 1: try to confirm and save the transaction
+        let result: { transactionId: string; summary: string };
         try {
-            const result = await confirmAndSave(confirmationId, user.id);
+            result = await confirmAndSave(confirmationId, user.id);
+            console.log(`[SUMA] ✅ Transaction saved: ${result.transactionId}`);
+        } catch (err) {
+            console.error(`[SUMA] ❌ confirmAndSave failed:`, err);
+            // Pending was already consumed (double-tap) or expired
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "⚠️ Ese movimiento ya fue procesado o expiró. Si necesitás registrar otro, escribilo de nuevo.",
+            });
+            return;
+        }
+
+        // Step 2: send confirmation to user (transaction is already saved)
+        try {
             await sendPostConfirmationButtons({
                 to: userPhone, ...sendParams,
                 summaryText: "✅ *Registrado*\n\n" + result.summary,
                 transactionId: result.transactionId,
             });
-            await saveMessage(user.id, "user", "[Confirmó: Sí]");
-            await saveMessage(user.id, "assistant", "[Transacción guardada]");
-        } catch {
+        } catch (sendErr) {
+            console.error(`[SUMA] ⚠️ Post-confirmation buttons failed, falling back to text:`, sendErr);
+            // Fallback: send a simple text confirmation so user always gets feedback
             await sendSimpleText({
                 to: userPhone, ...sendParams,
-                text: "⚠️ Esa confirmación ya expiró. Escribí de nuevo tu movimiento.",
+                text: "✅ *Registrado correctamente.*\n\n" + result.summary,
             });
         }
+
+        await saveMessage(user.id, "user", "[Confirmó: Sí]");
+        await saveMessage(user.id, "assistant", "[Transacción guardada]");
         return;
     }
 
     // ── Rechazar y corregir (No) ──
     if (replyId.startsWith("confirm_no_")) {
         const confirmationId = replyId.replace("confirm_no_", "");
-        await startFieldCorrection(confirmationId, userPhone, sendParams);
-        await saveMessage(user.id, "user", "[Confirmó: No, quiere corregir]");
+        try {
+            await startFieldCorrection(confirmationId, userPhone, sendParams);
+            await saveMessage(user.id, "user", "[Confirmó: No, quiere corregir]");
+        } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.error(`[SUMA] ❌ confirm_no failed:`, errMsg);
+
+            if (errMsg.includes("no encontrada") || errMsg.includes("not found")) {
+                // Pending was already consumed (double-tap) or expired
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "⚠️ Ese movimiento ya fue procesado o expiró. Si necesitás registrar otro, escribilo de nuevo.",
+                });
+            } else {
+                // WhatsApp list message failed — fallback to text-based correction
+                console.error(`[SUMA] ⚠️ List message failed, falling back to text prompt`);
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "✏️ No pude mostrar la lista de campos. Escribime directamente qué querés corregir, por ejemplo:\n\n" +
+                        "• _\"El monto es 8000\"_\n" +
+                        "• _\"La categoría es transporte\"_\n" +
+                        "• _\"Es un ingreso, no un gasto\"_",
+                });
+            }
+        }
         return;
     }
 
