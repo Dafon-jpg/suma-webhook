@@ -222,17 +222,18 @@ async function processMessage(
         apiToken: config.WHATSAPP_API_TOKEN,
     };
 
-    // ── PASO 1: Extraer contenido ───────────────────────────────────────
+    // ── PASO 1: Detectar si es respuesta interactiva (botones/listas) ───
+    // Must be checked BEFORE extractContent, which returns null for interactive
+    if (msg.type === "interactive") {
+        await handleInteractiveReply(msg, userPhone, sendParams);
+        return;
+    }
+
+    // ── PASO 2: Extraer contenido ───────────────────────────────────────
     const { text, media, rawLabel } = await extractContent(msg, config.WHATSAPP_API_TOKEN);
 
     if (text === null && !media) {
         console.log(`[SUMA] ⏭️ Ignoring message type: ${msg.type} from ${userPhone}`);
-        return;
-    }
-
-    // ── PASO 2: Detectar si es respuesta interactiva ────────────────────
-    if (msg.type === "interactive") {
-        await handleInteractiveReply(msg, userPhone, sendParams);
         return;
     }
 
