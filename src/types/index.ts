@@ -74,6 +74,9 @@ export interface SubscriptionRow {
   is_active: boolean;
   cancelled_at: string | null;
   created_at: string;
+  end_date: string | null;
+  alert_date: string | null;
+  alert_sent: boolean;
 }
 
 /** Row in the `pending_confirmations` table */
@@ -123,6 +126,8 @@ export interface ParsedSubscription {
   frequency: "monthly" | "annual" | "weekly";
   account: string;
   start_date: string; // ISO date string
+  duration_months: number | null; // e.g. 6 for "6 meses"
+  end_date: string | null; // ISO date, calculated from start_date + duration_months
 }
 
 /**

@@ -93,8 +93,13 @@ export const TRANSACTION_RESPONSE_SCHEMA = {
                     type: "STRING",
                     description: "ISO date (YYYY-MM-DD), default today",
                 },
+                duration_months: {
+                    type: "NUMBER",
+                    description: "Duration in months if specified (e.g. '6 meses' → 6, '1 año' → 12). 0 if not mentioned.",
+                    nullable: true,
+                },
             },
-            required: ["service_name", "amount", "currency", "frequency", "account", "start_date"],
+            required: ["service_name", "amount", "currency", "frequency", "account", "start_date", "duration_months"],
         },
         reply_message: {
             type: "STRING",
@@ -124,8 +129,9 @@ Analizá cada mensaje y clasificalo en UNA intención:
    - Monto SIEMPRE positivo. "5.000,50"=5000.50, "5k"=5000, "250 lucas"=250000.
 
 2. "subscription" → Suscripción o servicio recurrente (Netflix, Spotify, gym, etc.).
-   - Extraé: servicio, monto, frecuencia (monthly default), cuenta, start_date (hoy ISO default).
+   - Extraé: servicio, monto, frecuencia (monthly default), cuenta, start_date (hoy ISO default), duration_months.
    - Monto 0 si no lo dice.
+   - duration_months: si el usuario menciona duración ("por 6 meses", "durante un año", "3 meses"), extraé el número de meses (1 año = 12). Si no menciona duración, poné 0.
 
 3. "query" → Pregunta sobre finanzas. Respondé con personalidad en reply_message.
 
@@ -209,7 +215,22 @@ export function postProcessIntent(parsed: ParsedIntent): ParsedIntent {
 
     // Add required `intent` field to subscription_data (not in Gemini schema)
     if (parsed.intent === "subscription" && parsed.subscription_data) {
-        (parsed.subscription_data as ParsedSubscription).intent = "subscription";
+        const sub = parsed.subscription_data as ParsedSubscription;
+        sub.intent = "subscription";
+
+        // Normalize duration_months: 0 or falsy → null (indefinite)
+        if (!sub.duration_months || sub.duration_months <= 0) {
+            sub.duration_months = null;
+        }
+
+        // Calculate end_date from start_date + duration_months
+        if (sub.duration_months && sub.start_date) {
+            const start = new Date(sub.start_date);
+            start.setMonth(start.getMonth() + sub.duration_months);
+            sub.end_date = start.toISOString().split("T")[0];
+        } else {
+            sub.end_date = null;
+        }
     }
 
     // Validate amount for transactions

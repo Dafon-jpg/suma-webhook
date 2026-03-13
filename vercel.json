@@ -6,6 +6,9 @@
     },
     "api/process-message.ts": {
       "maxDuration": 60
+    },
+    "api/process-alerts.ts": {
+      "maxDuration": 30
     }
   }
 }

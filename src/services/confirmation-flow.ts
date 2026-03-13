@@ -144,12 +144,12 @@ export async function sendConfirmation(
 
 /**
  * Confirms a pending transaction: persists to DB and removes the pending record.
- * Returns the transaction ID and a summary string.
+ * Returns the transaction ID, a summary string, and subscription details if applicable.
  */
 export async function confirmAndSave(
     confirmationId: string,
     userId: string,
-): Promise<{ transactionId: string; summary: string }> {
+): Promise<{ transactionId: string; summary: string; subscriptionId?: string; endDate?: string; serviceName?: string }> {
     const supabase = getSupabaseClient();
 
     const { data: row, error } = await supabase
@@ -212,7 +212,7 @@ async function saveSubscription(
     pending: PendingConfirmationRow,
     userId: string,
     supabase: ReturnType<typeof getSupabaseClient>,
-): Promise<{ transactionId: string; summary: string }> {
+): Promise<{ transactionId: string; summary: string; subscriptionId?: string; endDate?: string; serviceName?: string }> {
     const data = pending.transaction_data as ParsedSubscription;
 
     const [accountId, categoryId] = await Promise.all([
@@ -232,20 +232,28 @@ async function saveSubscription(
         raw_message: null,
     });
 
-    // Also insert into subscriptions table
+    // Also insert into subscriptions table (with end_date if present)
     const nextPayment = data.start_date || new Date().toISOString();
-    const { error: subError } = await supabase
+    const insertData: Record<string, unknown> = {
+        user_id: userId,
+        account_id: accountId,
+        service_name: data.service_name,
+        amount: data.amount,
+        currency: data.currency,
+        frequency: data.frequency,
+        next_payment_at: nextPayment,
+        category_id: categoryId,
+    };
+
+    if (data.end_date) {
+        insertData.end_date = data.end_date;
+    }
+
+    const { data: subRow, error: subError } = await supabase
         .from("subscriptions")
-        .insert({
-            user_id: userId,
-            account_id: accountId,
-            service_name: data.service_name,
-            amount: data.amount,
-            currency: data.currency,
-            frequency: data.frequency,
-            next_payment_at: nextPayment,
-            category_id: categoryId,
-        });
+        .insert(insertData)
+        .select("id")
+        .single();
 
     if (subError) {
         console.error("[SUMA] ⚠️ Failed to insert subscription (transaction saved):", subError);
@@ -256,11 +264,15 @@ async function saveSubscription(
         .delete()
         .eq("id", pending.id);
 
-    console.log(`[SUMA] 💾 Subscription confirmed: ${saved.id} for user ${userId.slice(0, 8)}`);
+    const subscriptionId = subRow?.id as string | undefined;
+    console.log(`[SUMA] 💾 Subscription confirmed: ${saved.id} (sub: ${subscriptionId?.slice(0, 8) ?? "N/A"}) for user ${userId.slice(0, 8)}`);
 
     return {
         transactionId: saved.id!,
         summary: buildSubscriptionSummary(data),
+        subscriptionId: subscriptionId ?? undefined,
+        endDate: data.end_date ?? undefined,
+        serviceName: data.service_name,
     };
 }
 

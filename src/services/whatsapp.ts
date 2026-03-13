@@ -339,13 +339,132 @@ export function buildTransactionSummary(data: ParsedTransactionData): string {
  * Builds a summary text for subscription confirmation.
  */
 export function buildSubscriptionSummary(data: ParsedSubscription): string {
-  return [
+  const lines = [
     `¿Registramos esta suscripción?\n`,
     `🔄 *Servicio:* ${data.service_name}`,
     `💰 *Monto:* ${formatARS(data.amount)}`,
     `📅 *Frecuencia:* ${FREQUENCY_DISPLAY[data.frequency] ?? data.frequency}`,
     `🏦 *Cuenta:* ${data.account}`,
-  ].join("\n");
+  ];
+
+  if (data.end_date) {
+    const startFormatted = formatDateAR(data.start_date);
+    const endFormatted = formatDateAR(data.end_date);
+    lines.push(`📆 *Vigencia:* ${startFormatted} → ${endFormatted} (${data.duration_months} meses)`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Sends alert prompt buttons after a subscription with end_date is confirmed.
+ * Three buttons: "Sí, recordame" / "No, gracias" / "Elegir fecha"
+ */
+export async function sendAlertButtons(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  subscriptionId: string;
+  serviceName: string;
+  endDate: string;
+}): Promise<void> {
+  const endFormatted = formatDateAR(params.endDate);
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: `✅ Registrado. Tu suscripción a *${params.serviceName}* vence el ${endFormatted}.\n\n¿Querés que te envíe un recordatorio antes del vencimiento?`,
+        },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: `alert_yes_${params.subscriptionId}`,
+                title: "📅 Sí, recordame",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: `alert_no_${params.subscriptionId}`,
+                title: "🔕 No, gracias",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: `alert_custom_${params.subscriptionId}`,
+                title: "✏️ Elegir fecha",
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Sends a renewal reminder message with Renew/Cancel buttons.
+ */
+export async function sendRenewalReminder(params: {
+  to: string;
+  phoneNumberId: string;
+  apiToken: string;
+  subscriptionId: string;
+  serviceName: string;
+  endDate: string;
+}): Promise<void> {
+  const endFormatted = formatDateAR(params.endDate);
+  await callWhatsAppAPI({
+    phoneNumberId: params.phoneNumberId,
+    apiToken: params.apiToken,
+    to: params.to,
+    body: {
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: `🔔 *Recordatorio:* Tu suscripción a *${params.serviceName}* vence el ${endFormatted}.\n\n¿Querés renovarla o cancelarla?`,
+        },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: `renew_${params.subscriptionId}`,
+                title: "🔄 Renovar",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: `cancel_sub_${params.subscriptionId}`,
+                title: "❌ Cancelar",
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Formats an ISO date string to Argentine format (DD/MM/YYYY).
+ */
+function formatDateAR(isoDate: string): string {
+  const d = new Date(isoDate);
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const year = d.getUTCFullYear();
+  return `${day}/${month}/${year}`;
 }
 
 /**

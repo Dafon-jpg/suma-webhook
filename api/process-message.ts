@@ -35,7 +35,14 @@ import {
 import {
     sendSimpleText,
     sendPostConfirmationButtons,
+    sendAlertButtons,
 } from "../src/services/whatsapp.js";
+import {
+    scheduleAlert,
+    getDefaultAlertDate,
+    renewSubscription,
+    cancelSubscription,
+} from "../src/services/alerts.js";
 import {
     createPending,
     getPending,
@@ -232,13 +239,53 @@ async function processMessage(
         return;
     }
 
-    // ── PASO 5: Check si hay pending_confirmation con field_editing ──────
+    // ── PASO 5a: Check si hay pending_confirmation con field_editing ─────
     const pending = await getPending(user.id);
     if (pending !== null && pending.field_editing !== null) {
         await applyFieldCorrection(pending.id, text ?? "", userPhone, sendParams);
         await saveMessage(user.id, "user", text ?? rawLabel);
         await saveMessage(user.id, "assistant", "[Confirmación actualizada]");
         return;
+    }
+
+    // ── PASO 5b: Check si estamos esperando fecha de alerta personalizada ──
+    if (text && msg.type === "text") {
+        const history5b = await getRecentHistory(user.id);
+        const lastSystem = history5b
+            .filter((m: ChatMessage) => m.role === "system")
+            .pop();
+
+        if (lastSystem?.content?.startsWith("[awaiting_alert_date:")) {
+            const subId = lastSystem.content.replace("[awaiting_alert_date:", "").replace("]", "");
+            const parsedDate = parseCustomDate(text);
+
+            if (parsedDate) {
+                try {
+                    await scheduleAlert(subId, parsedDate);
+                    const formatted = `${String(parsedDate.getUTCDate()).padStart(2, "0")}/${String(parsedDate.getUTCMonth() + 1).padStart(2, "0")}/${parsedDate.getUTCFullYear()}`;
+                    await sendSimpleText({
+                        to: userPhone, ...sendParams,
+                        text: `🔔 Listo, te aviso el ${formatted}.`,
+                    });
+                } catch (err) {
+                    console.error(`[SUMA] ❌ Custom alert scheduling failed:`, err);
+                    await sendSimpleText({
+                        to: userPhone, ...sendParams,
+                        text: "⚠️ No pude programar el recordatorio. Intentá más tarde.",
+                    });
+                }
+            } else {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "⚠️ No entendí la fecha. Escribila como DD/MM/YYYY (ej: 01/09/2026).",
+                });
+            }
+
+            // Clear the awaiting state
+            await saveMessage(user.id, "user", text);
+            await saveMessage(user.id, "system", "[alert_date_processed]");
+            return;
+        }
     }
 
     // ── PASO 6: Onboarding para usuarios nuevos ─────────────────────────
@@ -465,7 +512,7 @@ async function handleInteractiveReply(
         const confirmationId = replyId.replace("confirm_yes_", "");
 
         // Step 1: try to confirm and save the transaction
-        let result: { transactionId: string; summary: string };
+        let result: { transactionId: string; summary: string; subscriptionId?: string; endDate?: string; serviceName?: string };
         try {
             result = await confirmAndSave(confirmationId, user.id);
             console.log(`[SUMA] ✅ Transaction saved: ${result.transactionId}`);
@@ -479,7 +526,28 @@ async function handleInteractiveReply(
             return;
         }
 
-        // Step 2: send confirmation to user (transaction is already saved)
+        // Step 2: If subscription with end_date → send alert buttons instead of undo
+        if (result.subscriptionId && result.endDate) {
+            try {
+                await sendAlertButtons({
+                    to: userPhone, ...sendParams,
+                    subscriptionId: result.subscriptionId,
+                    serviceName: result.serviceName!,
+                    endDate: result.endDate,
+                });
+            } catch (alertErr) {
+                console.error(`[SUMA] ⚠️ Alert buttons failed, falling back to text:`, alertErr);
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "✅ *Suscripción registrada correctamente.*\n\n" + result.summary,
+                });
+            }
+            await saveMessage(user.id, "user", "[Confirmó: Sí]");
+            await saveMessage(user.id, "assistant", "[Suscripción guardada — pregunta de alerta enviada]");
+            return;
+        }
+
+        // Step 3: Regular transaction/subscription → send undo button
         try {
             await sendPostConfirmationButtons({
                 to: userPhone, ...sendParams,
@@ -488,7 +556,6 @@ async function handleInteractiveReply(
             });
         } catch (sendErr) {
             console.error(`[SUMA] ⚠️ Post-confirmation buttons failed, falling back to text:`, sendErr);
-            // Fallback: send a simple text confirmation so user always gets feedback
             await sendSimpleText({
                 to: userPhone, ...sendParams,
                 text: "✅ *Registrado correctamente.*\n\n" + result.summary,
@@ -547,6 +614,111 @@ async function handleInteractiveReply(
         const transactionId = replyId.replace("undo_", "");
         await handleUndoById(user.id, transactionId, userPhone, sendParams);
         await saveMessage(user.id, "user", "[Deshizo última transacción]");
+        return;
+    }
+
+    // ── Alert: Sí, recordame ──
+    if (replyId.startsWith("alert_yes_")) {
+        const subId = replyId.replace("alert_yes_", "");
+        try {
+            const supabase = getSupabaseClient();
+            const { data: sub } = await supabase
+                .from("subscriptions")
+                .select("end_date, service_name")
+                .eq("id", subId)
+                .single();
+
+            if (sub?.end_date) {
+                const alertDate = getDefaultAlertDate(sub.end_date);
+                await scheduleAlert(subId, alertDate);
+                const formatted = `${String(alertDate.getUTCDate()).padStart(2, "0")}/${String(alertDate.getUTCMonth() + 1).padStart(2, "0")}/${alertDate.getUTCFullYear()}`;
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: `🔔 Listo, te voy a avisar el ${formatted} antes de que venza tu suscripción a *${sub.service_name}*.`,
+                });
+            } else {
+                await sendSimpleText({
+                    to: userPhone, ...sendParams,
+                    text: "⚠️ No encontré la suscripción o no tiene fecha de vencimiento.",
+                });
+            }
+        } catch (err) {
+            console.error(`[SUMA] ❌ alert_yes failed:`, err);
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "⚠️ No pude programar el recordatorio. Intentá más tarde.",
+            });
+        }
+        await saveMessage(user.id, "user", "[Eligió: Sí, recordame]");
+        await saveMessage(user.id, "assistant", "[Alerta programada]");
+        return;
+    }
+
+    // ── Alert: No, gracias ──
+    if (replyId.startsWith("alert_no_")) {
+        await sendSimpleText({
+            to: userPhone, ...sendParams,
+            text: "👍 Perfecto, no te voy a enviar recordatorio.",
+        });
+        await saveMessage(user.id, "user", "[Eligió: No, gracias]");
+        await saveMessage(user.id, "assistant", "[Sin alerta]");
+        return;
+    }
+
+    // ── Alert: Elegir fecha ──
+    if (replyId.startsWith("alert_custom_")) {
+        const subId = replyId.replace("alert_custom_", "");
+        // Store the subscription ID in chat memory so next text message is treated as date input
+        await saveMessage(user.id, "system", `[awaiting_alert_date:${subId}]`);
+        await sendSimpleText({
+            to: userPhone, ...sendParams,
+            text: "📅 ¿Qué fecha querés que te avise? Escribilo como DD/MM/YYYY (ej: 01/09/2026).",
+        });
+        await saveMessage(user.id, "user", "[Eligió: Elegir fecha]");
+        await saveMessage(user.id, "assistant", "[Esperando fecha de alerta]");
+        return;
+    }
+
+    // ── Renovar suscripción ──
+    if (replyId.startsWith("renew_")) {
+        const subId = replyId.replace("renew_", "");
+        const renewed = await renewSubscription(subId);
+        if (renewed) {
+            const endFormatted = renewed.end_date
+                ? `${String(new Date(renewed.end_date).getUTCDate()).padStart(2, "0")}/${String(new Date(renewed.end_date).getUTCMonth() + 1).padStart(2, "0")}/${new Date(renewed.end_date).getUTCFullYear()}`
+                : "indefinida";
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: `🔄 *Suscripción renovada:* ${renewed.service_name}\n📆 Nueva vigencia hasta: ${endFormatted}`,
+            });
+        } else {
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "⚠️ No pude renovar la suscripción. Puede que ya no exista.",
+            });
+        }
+        await saveMessage(user.id, "user", "[Renovó suscripción]");
+        await saveMessage(user.id, "assistant", "[Suscripción renovada]");
+        return;
+    }
+
+    // ── Cancelar suscripción ──
+    if (replyId.startsWith("cancel_sub_")) {
+        const subId = replyId.replace("cancel_sub_", "");
+        const cancelled = await cancelSubscription(subId);
+        if (cancelled) {
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "❌ Suscripción cancelada. Ya no vas a recibir recordatorios sobre ella.",
+            });
+        } else {
+            await sendSimpleText({
+                to: userPhone, ...sendParams,
+                text: "⚠️ No pude cancelar la suscripción. Intentá más tarde.",
+            });
+        }
+        await saveMessage(user.id, "user", "[Canceló suscripción]");
+        await saveMessage(user.id, "assistant", "[Suscripción cancelada]");
         return;
     }
 }
@@ -626,6 +798,30 @@ async function handleUndoById(
 async function updateUserName(userId: string, name: string): Promise<void> {
     const supabase = getSupabaseClient();
     await supabase.from("users").update({ name }).eq("id", userId);
+}
+
+// ---------------------------------------------------------------------------
+// Date parser for custom alert dates
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses DD/MM/YYYY or DD-MM-YYYY into a UTC Date. Returns null on failure.
+ */
+function parseCustomDate(input: string): Date | null {
+    const match = input.trim().match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/);
+    if (!match) return null;
+
+    const day = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10) - 1; // 0-indexed
+    const year = parseInt(match[3], 10);
+
+    if (month < 0 || month > 11 || day < 1 || day > 31 || year < 2024) return null;
+
+    const date = new Date(Date.UTC(year, month, day));
+    // Validate the date is real (e.g., 31/02 would roll over)
+    if (date.getUTCDate() !== day || date.getUTCMonth() !== month) return null;
+
+    return date;
 }
 
 // ---------------------------------------------------------------------------
