@@ -1,5 +1,5 @@
 -- ============================================================================
--- SUMA — Migration 006: Tablas de Fase 1
+-- SUMA — Migration 007: Tablas de Fase 1
 --
 -- Crea las tablas necesarias para:
 --   - chat_sessions: historial conversacional (memoria de corto plazo)

@@ -1,5 +1,5 @@
 -- ============================================================================
--- SUMA — Migration 003: Google Sheets integration columns
+-- SUMA — Migration 004: Google Sheets integration columns
 -- Run this in the Supabase SQL Editor
 -- ============================================================================
 

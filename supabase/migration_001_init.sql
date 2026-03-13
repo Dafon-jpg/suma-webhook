@@ -1,6 +1,7 @@
 -- ============================================================================
 -- SUMA — Database Schema
 -- Run this in the Supabase SQL Editor (or as a migration)
+-- migration_001_init.sql
 -- ============================================================================
 
 -- Enable UUID generation

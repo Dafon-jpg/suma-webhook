@@ -1,5 +1,5 @@
 -- ============================================================================
--- SUMA — Migration 007: Subscription alerts & duration
+-- SUMA — Migration 009: Subscription alerts & duration
 --
 -- Adds end_date, alert_date, and alert_sent to the subscriptions table
 -- to support time-bound subscriptions and proactive renewal reminders.

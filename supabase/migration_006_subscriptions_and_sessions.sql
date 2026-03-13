@@ -1,5 +1,5 @@
 -- ============================================================================
--- SUMA — Migration 005: Suscripciones unificadas + tablas NextAuth
+-- SUMA — Migration 006: Suscripciones unificadas + tablas NextAuth
 --
 -- Parte A: Campos de suscripción en users (MercadoPago + Stripe futuro)
 -- Parte B: Tabla web_sessions (NextAuth)

@@ -1,5 +1,5 @@
 -- ======================================================
--- Migración: Agregar 'savings' al ENUM de transactions.type
+-- SUMA — Migration 008: Agregar 'savings' al ENUM de transactions.type
 -- Ejecutar en Supabase SQL Editor
 -- ======================================================
 

@@ -1,5 +1,5 @@
 -- ============================================================================
--- SUMA — Migration 004: Evolución a Libro Mayor (Ledger)
+-- SUMA — Migration 005: Evolución a Libro Mayor (Ledger)
 --
 -- Transforma el modelo de "solo gastos" a un sistema contable completo:
 --   - Tabla accounts (cuentas del usuario: Efectivo, Banco, MP, etc.)
