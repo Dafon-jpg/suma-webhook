@@ -54,6 +54,7 @@ import {
 } from "../src/services/confirmation-flow.js";
 import { getRecentHistory, saveMessage } from "../src/services/chat-memory.js";
 import { getSupabaseClient } from "../src/lib/supabase.js";
+import { handleSalesFlow } from "../src/services/sales-flow.js";
 import type { IncomingMessage } from "node:http";
 
 // Diagnostic: if you don't see this in logs, the module failed to load
@@ -195,6 +196,14 @@ async function processMessage(
     // ── PASO 1: Detectar si es respuesta interactiva (botones/listas) ───
     // Must be checked BEFORE extractContent, which returns null for interactive
     if (msg.type === "interactive") {
+        // Check if this is a sale button from a non-subscribed user
+        const replyId = msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? "";
+        if (replyId.startsWith("sale_")) {
+            // Sale buttons need to go through the sales flow, not the regular handler
+            const user = await upsertUser(userPhone);
+            await handleSalesFlow(msg, user, userPhone, sendParams, waProfileName);
+            return;
+        }
         await handleInteractiveReply(msg, userPhone, sendParams);
         return;
     }
@@ -227,15 +236,7 @@ async function processMessage(
     // ── PASO 4: Check si usuario está suscripto ─────────────────────────
     console.log(`[SUMA] 👤 User ${userPhone}: subscriptionStatus="${user.subscriptionStatus}", isSubscribed=${user.isSubscribed}`);
     if (user.subscriptionStatus !== "active" && !user.isSubscribed) {
-        await sendSimpleText({
-            to: userPhone,
-            ...sendParams,
-            text: "¡Hola! 👋 Soy Suma, tu asistente financiero por WhatsApp.\n\n" +
-                "Para usar todas mis funciones necesitás una cuenta activa.\n" +
-                "Registrate en 👉 https://suma.digital",
-        });
-        await saveMessage(user.id, "user", text ?? rawLabel);
-        await saveMessage(user.id, "assistant", "[Mensaje de invitación a suscribirse]");
+        await handleSalesFlow(msg, user, userPhone, sendParams, waProfileName);
         return;
     }
 

@@ -148,6 +148,16 @@ export interface ParsedIntent {
 /** How the user originally registered — computed at runtime, not stored in DB */
 export type OnboardingSource = "web" | "whatsapp" | "unknown";
 
+/** Sales funnel stage — tracks where the user is in the subscription sales flow */
+export type SaleStage =
+  | "pitch_sent"
+  | "info_sent"
+  | "capturing_name"
+  | "capturing_email"
+  | "awaiting_payment"
+  | "declined"
+  | "declined_final";
+
 /** User info returned by upsertUser */
 export interface UserInfo {
   id: string;
@@ -156,6 +166,8 @@ export interface UserInfo {
   subscriptionStatus: "none" | "pending" | "active" | "cancelled";
   email: string | null;
   onboardingSource: OnboardingSource; // Computed: web | whatsapp | unknown
+  saleStage: SaleStage | null;       // Current stage in sales funnel
+  saleAttempts: number;              // Number of pitch attempts (max 2)
 }
 
 // ---------------------------------------------------------------------------

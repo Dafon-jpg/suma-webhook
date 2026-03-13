@@ -45,7 +45,7 @@ export async function upsertUser(
     // Step 1: Try to find existing user
     const { data: existing } = await supabase
         .from("users")
-        .select("id, name, is_subscribed, subscription_status, email")
+        .select("id, name, is_subscribed, subscription_status, email, sale_stage, sale_attempts")
         .eq("phone", phone)
         .single();
 
@@ -69,6 +69,8 @@ export async function upsertUser(
             subscriptionStatus,
             email: existing.email ?? null,
             onboardingSource,
+            saleStage: existing.sale_stage ?? null,
+            saleAttempts: existing.sale_attempts ?? 0,
         };
     }
 
@@ -76,7 +78,7 @@ export async function upsertUser(
     const { data: created, error: insertError } = await supabase
         .from("users")
         .insert({ phone, name: name ?? null })
-        .select("id, name, is_subscribed, subscription_status, email")
+        .select("id, name, is_subscribed, subscription_status, email, sale_stage, sale_attempts")
         .single();
 
     if (insertError) {
@@ -97,6 +99,8 @@ export async function upsertUser(
         subscriptionStatus,
         email: created.email ?? null,
         onboardingSource,
+        saleStage: created.sale_stage ?? null,
+        saleAttempts: created.sale_attempts ?? 0,
     };
 }
 
