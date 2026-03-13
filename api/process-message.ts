@@ -7,7 +7,7 @@
 // Pipeline:
 //   1. Verify QStash signature
 //   2. Check idempotency (skip if already processed)
-//   3. Parse message → classify intent via transaction-parser
+//   3. Parse message → classify intent via type-specific parsers
 //   4. Route by intent: record | query | system_command | unknown
 //   5. Return 200 on success (or 5xx for QStash to retry)
 // ============================================================================
@@ -16,7 +16,6 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import type {
     QueuedMessagePayload,
     WhatsAppMessage,
-    MediaContent,
     ParsedIntent,
     ChatMessage,
 } from "../src/types/index.js";
@@ -27,8 +26,8 @@ import {
     markMessageProcessed,
     markMessageError,
 } from "../src/services/idempotency.js";
-import { parseTransaction } from "../src/services/transaction-parser.js";
-import { downloadWhatsAppMedia } from "../src/services/whatsapp-media.js";
+import { parseText, parseAudio, parseImage } from "../src/services/parsers/index.js";
+import type { ParseOptions } from "../src/services/parsers/index.js";
 import {
     upsertUser,
     getMonthlyTransactionCount,
@@ -166,46 +165,10 @@ interface SendParams {
 }
 
 // ---------------------------------------------------------------------------
-// Content extraction — normalizes text/audio/image into a common shape
+// Supported message types for parsing
 // ---------------------------------------------------------------------------
 
-interface ExtractedContent {
-    text: string | null;
-    media?: MediaContent;
-    rawLabel: string;
-}
-
-async function extractContent(
-    msg: WhatsAppMessage,
-    apiToken: string,
-): Promise<ExtractedContent> {
-    switch (msg.type) {
-        case "text":
-            return {
-                text: msg.text?.body ?? null,
-                rawLabel: msg.text?.body ?? "",
-            };
-
-        case "audio":
-            if (!msg.audio) return { text: null, rawLabel: "" };
-            return {
-                text: "",
-                media: await downloadWhatsAppMedia(msg.audio.id, apiToken),
-                rawLabel: "[audio]",
-            };
-
-        case "image":
-            if (!msg.image) return { text: null, rawLabel: "" };
-            return {
-                text: msg.image.caption ?? "",
-                media: await downloadWhatsAppMedia(msg.image.id, apiToken),
-                rawLabel: msg.image.caption ? `[imagen] ${msg.image.caption}` : "[imagen]",
-            };
-
-        default:
-            return { text: null, rawLabel: "" };
-    }
-}
+const PARSEABLE_TYPES = new Set(["text", "audio", "image"]);
 
 // ---------------------------------------------------------------------------
 // Message processing pipeline — Fase 1: full conversational flow
@@ -229,15 +192,27 @@ async function processMessage(
         return;
     }
 
-    // ── PASO 2: Extraer contenido ───────────────────────────────────────
-    const { text, media, rawLabel } = await extractContent(msg, config.WHATSAPP_API_TOKEN);
-
-    if (text === null && !media) {
+    // ── PASO 2: Validar tipo de mensaje ─────────────────────────────────
+    if (!PARSEABLE_TYPES.has(msg.type)) {
         console.log(`[SUMA] ⏭️ Ignoring message type: ${msg.type} from ${userPhone}`);
         return;
     }
 
-    console.log(`[SUMA] 📩 Processing ${msg.type} from ${userPhone}: "${text ?? "[media]"}"`);
+    // Extract text early for text messages (needed for onboarding, field editing, logging)
+    const text = msg.type === "text" ? (msg.text?.body ?? null) : null;
+    const rawLabel = msg.type === "text"
+        ? (msg.text?.body ?? "")
+        : msg.type === "audio"
+            ? "[audio]"
+            : msg.image?.caption ? `[imagen] ${msg.image.caption}` : "[imagen]";
+
+    // For text messages, reject null text
+    if (msg.type === "text" && text === null) {
+        console.log(`[SUMA] ⏭️ Empty text message from ${userPhone}`);
+        return;
+    }
+
+    console.log(`[SUMA] 📩 Processing ${msg.type} from ${userPhone}: "${text ?? rawLabel}"`);
 
     // ── PASO 3: upsertUser ──────────────────────────────────────────────
     const user = await upsertUser(userPhone);
@@ -334,19 +309,48 @@ async function processMessage(
         getMonthlyTransactionCount(user.id),
     ]);
 
-    // ── PASO 8: Llamar a Gemini NLU ─────────────────────────────────────
-    const parsed: ParsedIntent = await parseTransaction(
-        text ?? "",
-        config.GEMINI_API_KEY!,
-        config.GEMINI_MODEL,
-        {
-            media,
-            userName: user.name ?? undefined,
-            subscriptionStatus: user.subscriptionStatus,
-            monthlyTxCount: monthlyCount,
-            conversationHistory: history,
-        },
-    );
+    const parseOptions: ParseOptions = {
+        userName: user.name ?? undefined,
+        subscriptionStatus: user.subscriptionStatus,
+        monthlyTxCount: monthlyCount,
+        conversationHistory: history,
+    };
+
+    // ── PASO 8: Rutear al parser específico por tipo de mensaje ─────────
+    let parsed: ParsedIntent;
+
+    switch (msg.type) {
+        case "audio":
+            parsed = await parseAudio(
+                msg.audio!.id,
+                config.WHATSAPP_API_TOKEN,
+                config.GEMINI_API_KEY!,
+                config.GEMINI_MODEL,
+                parseOptions,
+            );
+            break;
+
+        case "image":
+            parsed = await parseImage(
+                msg.image!.id,
+                config.WHATSAPP_API_TOKEN,
+                config.GEMINI_API_KEY!,
+                config.GEMINI_MODEL,
+                msg.image?.caption,
+                parseOptions,
+            );
+            break;
+
+        case "text":
+        default:
+            parsed = await parseText(
+                text!,
+                config.GEMINI_API_KEY!,
+                config.GEMINI_MODEL,
+                parseOptions,
+            );
+            break;
+    }
 
     const intentLog = parsed.transaction_data
         ? `| ${parsed.transaction_data.type} $${parsed.transaction_data.amount}`
