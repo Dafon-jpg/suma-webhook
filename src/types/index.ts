@@ -145,6 +145,9 @@ export interface ParsedIntent {
 // User types
 // ---------------------------------------------------------------------------
 
+/** How the user originally registered — computed at runtime, not stored in DB */
+export type OnboardingSource = "web" | "whatsapp" | "unknown";
+
 /** User info returned by upsertUser */
 export interface UserInfo {
   id: string;
@@ -152,6 +155,7 @@ export interface UserInfo {
   isSubscribed: boolean;             // Computed: subscriptionStatus === 'active'
   subscriptionStatus: "none" | "pending" | "active" | "cancelled";
   email: string | null;
+  onboardingSource: OnboardingSource; // Computed: web | whatsapp | unknown
 }
 
 // ---------------------------------------------------------------------------

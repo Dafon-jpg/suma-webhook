@@ -9,11 +9,28 @@ import type {
     TransactionRow,
     AccountRow,
     UserInfo,
+    OnboardingSource,
 } from "../types/index.js";
 
 // ---------------------------------------------------------------------------
 // User operations
 // ---------------------------------------------------------------------------
+
+/**
+ * Derives how the user originally registered based on their current data.
+ * - "web": has email AND active subscription (registered via suma.digital)
+ * - "whatsapp": has name but no email (registered through the bot)
+ * - "unknown": freshly created, no data yet
+ */
+function deriveOnboardingSource(
+    name: string | null,
+    email: string | null,
+    subscriptionStatus: string,
+): OnboardingSource {
+    if (email !== null && subscriptionStatus === "active") return "web";
+    if (name !== null) return "whatsapp";
+    return "unknown";
+}
 
 /**
  * Finds or creates a user by WhatsApp phone number.
@@ -42,7 +59,8 @@ export async function upsertUser(
         const subscriptionStatus = existing.subscription_status ?? "none";
         const isSubscribed = subscriptionStatus === "active" || existing.is_subscribed === true;
 
-        console.log(`[SUMA] 👤 User found: ${existing.id}, subscription: ${subscriptionStatus}, isSubscribed: ${isSubscribed}`);
+        const onboardingSource = deriveOnboardingSource(existing.name ?? null, existing.email ?? null, subscriptionStatus);
+        console.log(`[SUMA] 👤 User found: ${existing.id}, subscription: ${subscriptionStatus}, isSubscribed: ${isSubscribed}, source: ${onboardingSource}`);
 
         return {
             id: existing.id,
@@ -50,6 +68,7 @@ export async function upsertUser(
             isSubscribed,
             subscriptionStatus,
             email: existing.email ?? null,
+            onboardingSource,
         };
     }
 
@@ -68,7 +87,8 @@ export async function upsertUser(
     const subscriptionStatus = created.subscription_status ?? "none";
     const isSubscribed = subscriptionStatus === "active" || created.is_subscribed === true;
 
-    console.log(`[SUMA] 👤 New user created: ${created.id}, subscription: ${subscriptionStatus}`);
+    const onboardingSource = deriveOnboardingSource(created.name ?? null, created.email ?? null, subscriptionStatus);
+    console.log(`[SUMA] 👤 New user created: ${created.id}, subscription: ${subscriptionStatus}, source: ${onboardingSource}`);
 
     return {
         id: created.id,
@@ -76,6 +96,7 @@ export async function upsertUser(
         isSubscribed,
         subscriptionStatus,
         email: created.email ?? null,
+        onboardingSource,
     };
 }
 

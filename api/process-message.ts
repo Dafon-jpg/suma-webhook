@@ -288,8 +288,29 @@ async function processMessage(
         }
     }
 
-    // ── PASO 6: Onboarding para usuarios nuevos ─────────────────────────
-    if (user.name === null) {
+    // ── PASO 6: Onboarding — 3 escenarios según origen del usuario ─────
+
+    // ESCENARIO A: Usuario registrado por la web, primer mensaje al bot
+    if (user.onboardingSource === "web") {
+        const recentHistory = await getRecentHistory(user.id);
+        if (recentHistory.length === 0) {
+            // Primer contacto — saludo corto personalizado (se muestra UNA sola vez)
+            await sendSimpleText({
+                to: userPhone,
+                ...sendParams,
+                text: `¡Hola ${user.name}! 👋 Soy Suma, tu asistente financiero.\n` +
+                    "Ya tengo tus datos del registro en suma.digital.\n\n" +
+                    'Empezá a contarme tus movimientos: _"Gasté 5000 en pizza"_ 🍕',
+            });
+            await saveMessage(user.id, "user", text ?? rawLabel);
+            await saveMessage(user.id, "assistant", "[Bienvenida usuario web]");
+            return;
+        }
+        // ESCENARIO B: Usuario web que ya habló antes → continuar al PASO 7
+    }
+
+    // ESCENARIO C: Usuario sin registro web (whatsapp o unknown)
+    if (user.onboardingSource !== "web" && user.name === null) {
         // Check if the user is responding to "¿Cómo te llamás?"
         const recentHistory = await getRecentHistory(user.id);
         const lastAssistantMsg = recentHistory
